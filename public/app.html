@@ -272,7 +272,7 @@
             <thead>
               <tr>
                 <th>Name</th><th>Email</th><th>Designation</th>
-                <th>Level</th><th>Code</th><th style="text-align:right;">Actions</th>
+                <th>Level</th><th>Login</th><th style="text-align:right;">Actions</th>
               </tr>
             </thead>
             <tbody id="empTableBody"></tbody>
@@ -321,6 +321,16 @@
       <div class="field span-2">
         <label>Reporting Manager Email</label>
         <input type="email" id="empManager" placeholder="admin@metfraa.com" />
+      </div>
+      <div class="field span-2">
+        <label>Login Method</label>
+        <select id="empAuthMethod">
+          <option value="">Auto (by email domain)</option>
+          <option value="microsoft">Microsoft (M365) SSO</option>
+          <option value="google">Google SSO</option>
+          <option value="password">Portal Password</option>
+        </select>
+        <div id="empAuthHint" style="font-size:12px;color:var(--bsg-muted);margin-top:6px;line-height:1.5;"></div>
       </div>
     </div>
     <div class="actions">

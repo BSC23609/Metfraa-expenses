@@ -1391,15 +1391,19 @@
     $('#empCount').textContent = `${rows.length} shown · ${state.adminEmployees.length} total`;
     tbody.innerHTML = '';
     for (const e of rows) {
+      const methodLabel = { microsoft: 'Microsoft', google: 'Google', password: 'Password' }[e.auth_method] || e.auth_method;
       const tr = el('tr', { class: e.is_active ? '' : 'inactive' },
         el('td', {}, el('strong', {}, e.name)),
         el('td', {}, e.email),
         el('td', {}, e.designation || '—'),
         el('td', {}, el('span', { class: 'lvl-badge ' + e.level }, `${e.level} · ${LEVEL_LABEL[e.level] || ''}`)),
-        el('td', {}, e.employee_code || '—'),
+        el('td', {}, el('span', { class: 'method-badge ' + e.auth_method }, methodLabel)),
         el('td', {},
           el('div', { class: 'admin-actions' },
             el('button', { class: 'edit', onclick: () => openEmployeeModal(e) }, 'Edit'),
+            e.auth_method === 'password'
+              ? el('button', { class: 'view', onclick: () => resetPassword(e) }, 'Reset PW')
+              : null,
             e.is_active
               ? el('button', { class: 'del', onclick: () => deactivateEmployee(e) }, 'Deactivate')
               : el('button', { class: 'reactivate', onclick: () => reactivateEmployee(e) }, 'Reactivate')
@@ -1411,6 +1415,19 @@
     if (!rows.length) {
       tbody.appendChild(el('tr', {}, el('td', { colspan: 6, style: 'text-align:center;color:var(--bsg-muted);padding:32px;' }, q ? 'No matches.' : 'No employees yet.')));
     }
+  }
+
+  async function resetPassword(emp) {
+    const ok = await confirmModal({
+      title: 'Reset password?',
+      body: `${emp.name}'s password will be reset to the default (Metfraa@123). They'll be asked to set a new one on next login.`,
+      confirmText: 'Reset',
+    });
+    if (!ok) return;
+    try {
+      const res = await api(`/api/admin/employees/${emp.id}/reset-password`, { method: 'POST', body: JSON.stringify({}) });
+      toast(`Password reset to ${res.password}`, 'success');
+    } catch (err) { toast(err.message || 'Reset failed', 'error'); }
   }
 
   let editingEmployeeId = null;
@@ -1425,7 +1442,26 @@
     $('#empDesignation').value = emp ? (emp.designation || '') : '';
     $('#empDepartment').value = emp ? (emp.department || '') : '';
     $('#empManager').value = emp ? (emp.manager_email || '') : '';
+    $('#empAuthMethod').value = emp ? (emp.auth_method || '') : '';
+    updateAuthHint();
     $('#empModalBackdrop').classList.add('show');
+  }
+  function updateAuthHint() {
+    const v = $('#empAuthMethod').value;
+    const email = $('#empEmail').value.trim().toLowerCase();
+    const hint = $('#empAuthHint');
+    if (!hint) return;
+    let msg = '';
+    if (v === 'password' || (!v && email && !email.endsWith('@metfraa.com') && !email.endsWith('@gmail.com'))) {
+      msg = 'Portal password — default Metfraa@123, user must change it on first login.';
+    } else if (v === 'microsoft' || (!v && email.endsWith('@metfraa.com'))) {
+      msg = 'Microsoft (M365) SSO — they sign in with their work account.';
+    } else if (v === 'google' || (!v && email.endsWith('@gmail.com'))) {
+      msg = 'Google SSO — they sign in with their Google account.';
+    } else {
+      msg = 'Auto: Microsoft for @metfraa.com, Google for @gmail.com, Password for everything else.';
+    }
+    hint.textContent = msg;
   }
   function closeEmployeeModal() {
     $('#empModalBackdrop').classList.remove('show');
@@ -1441,6 +1477,7 @@
       designation: $('#empDesignation').value.trim(),
       department: $('#empDepartment').value.trim(),
       manager_email: $('#empManager').value.trim(),
+      auth_method: $('#empAuthMethod').value || undefined,
     };
     if (!payload.name || !payload.email) { toast('Name and email are required', 'error'); return; }
 
@@ -1450,8 +1487,12 @@
         await api(`/api/admin/employees/${editingEmployeeId}`, { method: 'PUT', body: JSON.stringify(payload) });
         toast('Employee updated', 'success');
       } else {
-        await api('/api/admin/employees', { method: 'POST', body: JSON.stringify(payload) });
-        toast('Employee added', 'success');
+        const res = await api('/api/admin/employees', { method: 'POST', body: JSON.stringify(payload) });
+        if (res.default_password) {
+          toast(`Added. Password login: default is ${res.default_password}`, 'success');
+        } else {
+          toast('Employee added', 'success');
+        }
       }
       closeEmployeeModal();
       await loadEmployees();
@@ -1520,6 +1561,8 @@
   $('#empSearch') && $('#empSearch').addEventListener('input', drawEmployeeTable);
   $('#showInactive') && $('#showInactive').addEventListener('change', async () => { await loadEmployees(); drawEmployeeTable(); });
   $('#empModalBackdrop') && $('#empModalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'empModalBackdrop') closeEmployeeModal(); });
+  $('#empAuthMethod') && $('#empAuthMethod').addEventListener('change', updateAuthHint);
+  $('#empEmail') && $('#empEmail').addEventListener('input', updateAuthHint);
 
   // Admin tab switching
   $$('.admin-tab').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));

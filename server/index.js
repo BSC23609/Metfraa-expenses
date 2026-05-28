@@ -60,13 +60,17 @@ app.use('/api/admin',        require('./routes/admin'));
 
 // Login page — public
 app.get('/login', (req, res) => {
-  if (req.isAuthenticated && req.isAuthenticated()) return res.redirect('/');
+  const authed = req.isAuthenticated && req.isAuthenticated();
+  // Authenticated users normally bounce to the app — EXCEPT when they must
+  // change their password (the change form lives on the login page).
+  if (authed && !(req.user && req.user.must_change_pw)) return res.redirect('/');
   res.sendFile(path.join(__dirname, '..', 'public', 'login.html'));
 });
 
 // Root → gated
 app.get('/', (req, res) => {
   if (!req.isAuthenticated || !req.isAuthenticated()) return res.redirect('/login');
+  if (req.user && req.user.must_change_pw) return res.redirect('/login?change=1');
   res.sendFile(path.join(__dirname, '..', 'public', 'app.html'));
 });
 

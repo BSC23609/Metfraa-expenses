@@ -5,6 +5,7 @@
 const express = require('express');
 const { stmts, db } = require('../db');
 const { requireAdmin } = require('../services/auth');
+const { hashPassword, authMethodForEmail } = require('../services/auth');
 const syncSvc = require('../services/sync');
 const { buildReportPdf } = require('../services/report-builder');
 
@@ -108,8 +109,13 @@ router.post('/employees', requireAdmin, (req, res) => {
     .find(r => r.name.toLowerCase() === e.name.toLowerCase());
   if (dup) return res.status(409).json({ error: 'An active employee with this name and email already exists.' });
 
+  const email = e.email.toLowerCase().trim();
+  // auth_method: explicit choice, else inferred from the email domain
+  const method = (e.auth_method && ['microsoft', 'google', 'password'].includes(e.auth_method))
+    ? e.auth_method : authMethodForEmail(email);
+
   const info = stmts.insertEmployee.run({
-    email: e.email.toLowerCase().trim(),
+    email,
     name: e.name.trim(),
     employee_code: e.employee_code ? e.employee_code.trim() : null,
     company: 'metfraa',
@@ -117,15 +123,19 @@ router.post('/employees', requireAdmin, (req, res) => {
     designation: e.designation ? e.designation.trim() : null,
     department: e.department ? e.department.trim() : null,
     manager_email: e.manager_email ? e.manager_email.toLowerCase().trim() : null,
+    auth_method: method,
+    password_hash: method === 'password' ? hashPassword('Metfraa@123') : null,
+    must_change_pw: method === 'password' ? 1 : 0,
   });
 
   stmts.insertAudit.run({
     actor_email: req.user.email, action: 'EMPLOYEE_CREATE',
     target_type: 'employee', target_id: info.lastInsertRowid,
-    meta_json: JSON.stringify({ email: e.email, name: e.name, level }), ip_address: req.ip,
+    meta_json: JSON.stringify({ email, name: e.name, level, auth_method: method }), ip_address: req.ip,
   });
 
-  res.json({ ok: true, id: info.lastInsertRowid });
+  res.json({ ok: true, id: info.lastInsertRowid, auth_method: method,
+             default_password: method === 'password' ? 'Metfraa@123' : null });
 });
 
 // ---- Employees: update --------------------------------------------
@@ -138,6 +148,9 @@ router.put('/employees/:id', requireAdmin, (req, res) => {
   const level = normalizeLevel(e.level) || current.level;
   if (!e.email || !e.name) return res.status(400).json({ error: 'Name and email are required.' });
 
+  const method = (e.auth_method && ['microsoft', 'google', 'password'].includes(e.auth_method))
+    ? e.auth_method : current.auth_method;
+
   stmts.updateEmployee.run({
     id,
     email: e.email.toLowerCase().trim(),
@@ -148,16 +161,37 @@ router.put('/employees/:id', requireAdmin, (req, res) => {
     designation: e.designation != null ? String(e.designation).trim() : current.designation,
     department: e.department != null ? String(e.department).trim() : current.department,
     manager_email: e.manager_email ? e.manager_email.toLowerCase().trim() : current.manager_email,
+    auth_method: method,
     is_active: e.is_active != null ? (e.is_active ? 1 : 0) : current.is_active,
   });
+
+  // If switching TO password and they have no hash yet, set the default.
+  if (method === 'password' && !current.password_hash) {
+    stmts.setPassword.run({ id, hash: hashPassword('Metfraa@123'), must_change: 1 });
+  }
 
   stmts.insertAudit.run({
     actor_email: req.user.email, action: 'EMPLOYEE_UPDATE',
     target_type: 'employee', target_id: id,
-    meta_json: JSON.stringify({ email: e.email, name: e.name, level }), ip_address: req.ip,
+    meta_json: JSON.stringify({ email: e.email, name: e.name, level, auth_method: method }), ip_address: req.ip,
   });
 
   res.json({ ok: true });
+});
+
+// ---- Employees: reset password (admin) ----------------------------
+router.post('/employees/:id/reset-password', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const emp = stmts.getEmployeeById.get(id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found.' });
+  const newPw = (req.body && req.body.password) || 'Metfraa@123';
+  if (String(newPw).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  stmts.setPassword.run({ id, hash: hashPassword(String(newPw)), must_change: 1 });
+  stmts.insertAudit.run({
+    actor_email: req.user.email, action: 'PASSWORD_RESET', target_type: 'employee', target_id: id,
+    meta_json: JSON.stringify({ email: emp.email }), ip_address: req.ip,
+  });
+  res.json({ ok: true, password: newPw, note: 'User must change this on next login.' });
 });
 
 // ---- Employees: deactivate (soft delete) --------------------------

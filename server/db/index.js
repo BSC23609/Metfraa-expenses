@@ -37,6 +37,10 @@ db.exec(`
     designation   TEXT,
     department    TEXT,
     manager_email TEXT,
+    -- login method: 'microsoft' (M365 SSO) | 'google' (Gmail SSO) | 'password' (portal login)
+    auth_method   TEXT NOT NULL DEFAULT 'microsoft',
+    password_hash TEXT,                             -- bcrypt hash, only for auth_method='password'
+    must_change_pw INTEGER NOT NULL DEFAULT 0,      -- force password change on next login
     is_active     INTEGER NOT NULL DEFAULT 1,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -138,6 +142,13 @@ db.exec(`
   add('od_error',          `od_error TEXT`);
   // Normalise any legacy 'submitted' status to 'pending'
   db.exec(`UPDATE submissions SET status='pending' WHERE status='submitted'`);
+
+  // Employee auth columns (added after first release)
+  const ecols = db.prepare(`PRAGMA table_info(employees)`).all().map(c => c.name);
+  const eadd = (name, ddl) => { if (!ecols.includes(name)) db.exec(`ALTER TABLE employees ADD COLUMN ${ddl}`); };
+  eadd('auth_method',    `auth_method TEXT NOT NULL DEFAULT 'microsoft'`);
+  eadd('password_hash',  `password_hash TEXT`);
+  eadd('must_change_pw', `must_change_pw INTEGER NOT NULL DEFAULT 0`);
 })();
 
 // ====================================================================
@@ -151,17 +162,19 @@ const stmts = {
   findAllByEmail: db.prepare(`SELECT * FROM employees WHERE email = ? COLLATE NOCASE AND is_active = 1 ORDER BY id`),
   getEmployeeById: db.prepare(`SELECT * FROM employees WHERE id = ?`),
   insertEmployee: db.prepare(`
-    INSERT INTO employees (email, name, employee_code, company, level, designation, department, manager_email)
-    VALUES (@email, @name, @employee_code, @company, @level, @designation, @department, @manager_email)
+    INSERT INTO employees (email, name, employee_code, company, level, designation, department, manager_email, auth_method, password_hash, must_change_pw)
+    VALUES (@email, @name, @employee_code, @company, @level, @designation, @department, @manager_email, @auth_method, @password_hash, @must_change_pw)
   `),
   updateEmployee: db.prepare(`
     UPDATE employees SET
       email = @email, name = @name, employee_code = @employee_code,
       company = @company, level = @level, designation = @designation,
       department = @department, manager_email = @manager_email,
-      is_active = @is_active, updated_at = datetime('now')
+      auth_method = @auth_method, is_active = @is_active, updated_at = datetime('now')
     WHERE id = @id
   `),
+  setPassword: db.prepare(`UPDATE employees SET password_hash = @hash, must_change_pw = @must_change, auth_method='password', updated_at = datetime('now') WHERE id = @id`),
+  clearMustChange: db.prepare(`UPDATE employees SET must_change_pw = 0, updated_at = datetime('now') WHERE id = ?`),
   deactivateEmployee: db.prepare(`UPDATE employees SET is_active = 0, updated_at = datetime('now') WHERE id = ?`),
   listEmployees: db.prepare(`SELECT * FROM employees WHERE is_active = 1 ORDER BY company, name`),
   listEmployeesAll: db.prepare(`SELECT * FROM employees ORDER BY is_active DESC, company, name`),

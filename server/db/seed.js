@@ -119,6 +119,10 @@ const records = csvArg ? recordsFromCSV(path.resolve(csvArg)) : recordsFromBuilt
 
 console.log(`Seeding ${records.length} employees${csvArg ? ` from ${csvArg}` : ' (built-in Metfraa roster)'}…`);
 
+const bcrypt = require('bcryptjs');
+const { authMethodForEmail } = require('../services/auth');
+const DEFAULT_PW_HASH = bcrypt.hashSync('Metfraa@123', 10);
+
 let inserted = 0, skipped = 0;
 const tx = db.transaction((rows) => {
   for (const r of rows) {
@@ -129,6 +133,7 @@ const tx = db.transaction((rows) => {
     // De-dupe on (email + name) so re-running is safe even without unique email.
     const existing = stmts.findAllByEmail.all(r.email).find(e => e.name.toLowerCase() === r.name.toLowerCase());
     if (existing) { skipped++; continue; }
+    const method = authMethodForEmail(r.email);
     stmts.insertEmployee.run({
       email: r.email,
       name: r.name,
@@ -138,6 +143,10 @@ const tx = db.transaction((rows) => {
       designation: r.designation || null,
       department: r.department || null,
       manager_email: r.manager_email || null,
+      auth_method: method,
+      // password users get the shared default + forced change on first login
+      password_hash: method === 'password' ? DEFAULT_PW_HASH : null,
+      must_change_pw: method === 'password' ? 1 : 0,
     });
     inserted++;
   }
