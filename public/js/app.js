@@ -200,8 +200,13 @@
     $('#userName').textContent = u.name;
     $('#umName').textContent = u.name;
     $('#umEmail').textContent = u.email;
-    const levelName = { L1: 'Junior', L2: 'Senior', L3: 'Manager' }[u.level] || u.level;
-    $('#umLevel').textContent = `METFRAA · ${levelName.toUpperCase()} (${u.level})`;
+    if (u.level) {
+      const levelName = { L1: 'Junior', L2: 'Senior', L3: 'Manager' }[u.level] || u.level;
+      $('#umLevel').textContent = `METFRAA · ${String(levelName).toUpperCase()} (${u.level})`;
+    } else {
+      // Admin-only user (in ADMIN_EMAILS but not an employee) — no level.
+      $('#umLevel').textContent = 'METFRAA · ADMINISTRATOR';
+    }
     const initials = (u.name || '').split(/\s+/).filter(Boolean).slice(0, 2).map(s => s[0]).join('').toUpperCase();
     $('#userAvatar').textContent = initials || '·';
 
@@ -291,6 +296,21 @@
     $('#hubTitle').textContent = policy ? policy.name : '';
     const grid = $('#optionGrid');
     grid.innerHTML = '';
+
+    // Admin-only users (in ADMIN_EMAILS but not an employee) have no level
+    // and can't file claims as themselves — point them at the admin panel.
+    if (state.user && !state.user.level) {
+      grid.appendChild(
+        el('div', { class: 'option-card', onclick: () => route('admin') },
+          el('div', { class: 'icon-wrap', html: ICONS.briefcase || '' }),
+          el('h3', {}, 'Admin Panel'),
+          el('p', {}, 'Review pending claims, manage employees, and view all submissions.'),
+          el('div', { class: 'arrow' }, el('span', {}, 'Open'), el('div', { html: ICONS.arrow }))
+        )
+      );
+      return;
+    }
+
     const defs = FORM_DEFS[state.company] || [];
 
     for (const def of defs) {

@@ -50,16 +50,42 @@ function toSessionUser(e) {
   };
 }
 
-// Resolve a verified email to an employee, enforcing the allowlist.
+// Is this email configured as a portal admin?
+function isAdminEmail(email) {
+  const admins = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  return admins.includes((email || '').toLowerCase());
+}
+
+// A session object for an admin who isn't in the employee table.
+// Negative id so it never collides with a real employee row, and a
+// flag so the rest of the app can treat them as admin-only (no employee
+// profile / can't submit claims as themselves).
+function adminOnlySessionUser(email) {
+  return {
+    id: -1,
+    email: email.toLowerCase(),
+    name: email.split('@')[0],
+    company: 'metfraa',
+    level: null,
+    employee_code: null,
+    designation: 'Administrator',
+    department: 'Admin',
+    manager_email: null,
+    auth_method: authMethodForEmail(email),
+    must_change_pw: 0,
+    admin_only: true,
+  };
+}
+
+// Resolve a verified email to a session user.
+//   1) If they're an employee → employee session.
+//   2) Else if they're an ADMIN_EMAILS address → admin-only session.
+//   3) Else → rejected (not on the allowlist).
 function resolveEmployee(email, done, expectedMethods) {
   const e = stmts.findEmployeeByEmail.get(email);
-  if (!e) return done(null, false, { message: `${email} is not registered. Contact Admin to be added to the portal.` });
-  // Optional: ensure the SSO method matches what's configured for them.
-  if (expectedMethods && !expectedMethods.includes(e.auth_method)) {
-    // Allow it anyway (don't lock people out over a method mismatch), but
-    // SSO is only reachable for matching domains in practice.
-  }
-  return done(null, toSessionUser(e));
+  if (e) return done(null, toSessionUser(e));
+  if (isAdminEmail(email)) return done(null, adminOnlySessionUser(email));
+  return done(null, false, { message: `${email} is not registered. Contact Admin to be added to the portal.` });
 }
 
 // ---- Google ----
@@ -132,12 +158,15 @@ function init() {
   passport.use('microsoft', microsoftStrategy());
   passport.use('local', localStrategy());
 
-  passport.serializeUser((user, done) => done(null, user.id));
-  passport.deserializeUser((id, done) => {
+  // Serialize by email so we can re-resolve either an employee OR an
+  // admin-only user (who has no employee row) on each request.
+  passport.serializeUser((user, done) => done(null, user.email));
+  passport.deserializeUser((email, done) => {
     try {
-      const e = stmts.getEmployeeById.get(id);
-      if (!e || !e.is_active) return done(null, false);
-      done(null, toSessionUser(e));
+      const e = stmts.findEmployeeByEmail.get(email);
+      if (e && e.is_active) return done(null, toSessionUser(e));
+      if (isAdminEmail(email)) return done(null, adminOnlySessionUser(email));
+      return done(null, false);
     } catch (err) { done(err); }
   });
 }
