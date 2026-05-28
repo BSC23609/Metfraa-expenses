@@ -153,6 +153,119 @@
     });
   }
 
+  // ----- Submission viewer (in-app popup, data from DB) -----------
+  let viewCurrentId = null;
+  async function viewSubmission(id) {
+    viewCurrentId = id;
+    const bk = $('#viewBackdrop');
+    $('#viewBody').innerHTML = '<div style="padding:40px;text-align:center;color:var(--bsg-muted);">Loading…</div>';
+    bk.classList.add('show');
+    try {
+      const { submission: s } = await api(`/api/submissions/${id}`);
+      $('#viewRef').textContent = s.reference;
+      $('#viewTitle').textContent = FORM_LABEL[s.form_type] || s.form_type;
+      const pill = $('#viewStatus');
+      pill.textContent = s.status;
+      pill.className = 'status-pill ' + s.status;
+      $('#viewBody').innerHTML = '';
+      $('#viewBody').appendChild(renderSubmissionDetail(s));
+    } catch (err) {
+      $('#viewBody').innerHTML = `<div style="padding:30px;color:var(--bsg-danger);">${err.message || 'Could not load submission.'}</div>`;
+    }
+  }
+
+  function detailRow(label, value) {
+    return el('div', { class: 'vd-cell' },
+      el('div', { class: 'vd-label' }, label),
+      el('div', { class: 'vd-value' }, value == null || value === '' ? '—' : String(value))
+    );
+  }
+
+  function renderSubmissionDetail(s) {
+    const wrap = el('div', { class: 'view-detail' });
+    const p = s.payload || {};
+
+    // Meta grid
+    const meta = el('div', { class: 'vd-grid' },
+      detailRow('Employee', s.employee.name),
+      detailRow('Code', s.employee.code),
+      detailRow('Level', s.employee.level),
+      detailRow('Period', p.period || s.period),
+      detailRow('Submitted', fmtDateShort(s.submitted_at)),
+      detailRow('Status', s.status.charAt(0).toUpperCase() + s.status.slice(1)),
+    );
+    wrap.appendChild(meta);
+    if (s.reviewed_by) {
+      wrap.appendChild(el('div', { class: 'vd-review' },
+        `${s.status === 'approved' ? 'Approved' : 'Reviewed'} by ${s.reviewed_by}${s.reviewed_at ? ' · ' + fmtDateShort(s.reviewed_at) : ''}${s.review_note ? ' · "' + s.review_note + '"' : ''}`
+      ));
+    }
+
+    // Line items table per form type
+    const t = el('table', { class: 'vd-table' });
+    const head = (cols) => t.appendChild(el('thead', {}, el('tr', {}, ...cols.map(c => el('th', {}, c)))));
+    const body = el('tbody');
+    const money = (n) => '₹ ' + fmt(parseFloat(n) || 0);
+
+    if (s.form_type === 'met_local' || s.form_type === 'bsc_conveyance') {
+      head(['Date', 'From', 'To', 'Purpose', 'KM', 'Amount']);
+      (p.trips || []).forEach(tr => body.appendChild(el('tr', {},
+        el('td', {}, formatDate(tr.date)), el('td', {}, tr.from || '—'), el('td', {}, tr.to || '—'),
+        el('td', {}, tr.purpose || '—'), el('td', { class: 'num' }, tr.km), el('td', { class: 'num' }, money(tr.amount))
+      )));
+    } else if (s.form_type === 'met_cab') {
+      head(['Date', 'Pickup', 'Drop', 'Distance', 'Fare', 'Purpose']);
+      (p.rides || []).forEach(r => body.appendChild(el('tr', {},
+        el('td', {}, formatDate(r.date)), el('td', {}, r.pickup || '—'), el('td', {}, r.drop || '—'),
+        el('td', { class: 'num' }, `${r.km || '—'} km`), el('td', { class: 'num' }, money(r.fare)), el('td', {}, r.purpose || '—')
+      )));
+    } else if (s.form_type === 'met_misc') {
+      head(['Date', 'Purpose', 'Amount']);
+      (p.items || []).forEach(it => body.appendChild(el('tr', {},
+        el('td', {}, formatDate(it.date)), el('td', {}, it.purpose || '—'), el('td', { class: 'num' }, money(it.amount))
+      )));
+    } else if (s.form_type === 'met_accommodation') {
+      head(['Date', 'Location', 'Hotel', 'Bill #', 'Amount']);
+      (p.entries || []).forEach(e => body.appendChild(el('tr', {},
+        el('td', {}, formatDate(e.date)), el('td', {}, e.location || '—'), el('td', {}, e.hotel || '—'),
+        el('td', {}, e.bill_no || '—'), el('td', { class: 'num' }, money(e.amount))
+      )));
+    } else if (s.form_type === 'met_outstation' || s.form_type === 'bsc_expense') {
+      head(['Trip', 'Category', 'Date', 'Description', 'Amount']);
+      (p.trips || []).forEach(trip => {
+        Object.entries(trip.categories || {}).forEach(([cat, arr]) => {
+          (arr || []).forEach(it => {
+            if (!(parseFloat(it.amount) > 0) && !it.desc) return;
+            body.appendChild(el('tr', {},
+              el('td', {}, trip.place || '—'),
+              el('td', {}, cat.charAt(0).toUpperCase() + cat.slice(1)),
+              el('td', {}, formatDate(it.date)), el('td', {}, it.desc || '—'),
+              el('td', { class: 'num' }, money(it.amount))
+            ));
+          });
+        });
+      });
+    }
+    t.appendChild(body);
+    wrap.appendChild(t);
+
+    // Total
+    wrap.appendChild(el('div', { class: 'vd-total' },
+      el('span', {}, 'Total Reimbursement Claim'),
+      el('strong', {}, money(s.total_amount))
+    ));
+
+    // Attachments
+    if (s.attachments && s.attachments.length) {
+      const att = el('div', { class: 'vd-attachments' },
+        el('div', { class: 'vd-label' }, `${s.attachments.length} Bill${s.attachments.length === 1 ? '' : 's'} Attached`)
+      );
+      s.attachments.forEach(a => att.appendChild(el('span', { class: 'vd-chip' }, a.filename)));
+      wrap.appendChild(att);
+    }
+    return wrap;
+  }
+
   // ----- API ------------------------------------------------------
   async function api(path, opts = {}) {
     const res = await fetch(path, {
@@ -245,6 +358,7 @@
   const routes = {
     landing:     renderHub,   // Metfraa-only: 'landing' collapses into the hub
     hub:         renderHub,
+    history:     renderHistory,
     eligibility: renderEligibility,
     form:        renderForm,
     preview:     renderPreview,
@@ -315,6 +429,36 @@
   // ===================================================================
   //  HUB — form options + Check Eligibility
   // ===================================================================
+  async function renderHistory() {
+    const tbody = $('#historyTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--bsg-muted);padding:24px;">Loading…</td></tr>';
+    try {
+      const res = await api('/api/submissions');
+      const rows = res.submissions || [];
+      tbody.innerHTML = '';
+      if (!rows.length) {
+        tbody.appendChild(el('tr', {}, el('td', { colspan: 7, style: 'text-align:center;color:var(--bsg-muted);padding:32px;' }, 'No submissions yet.')));
+        return;
+      }
+      for (const s of rows) {
+        tbody.appendChild(el('tr', {},
+          el('td', {}, el('strong', {}, s.reference)),
+          el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
+          el('td', {}, s.period || '—'),
+          el('td', { class: 'num', style: 'text-align:right;' }, '₹ ' + fmt(s.total_amount)),
+          el('td', {}, el('span', { class: 'status-pill ' + s.status }, s.status)),
+          el('td', {}, fmtDateShort(s.submitted_at)),
+          el('td', {}, el('div', { class: 'admin-actions' },
+            el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View')
+          ))
+        ));
+      }
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--bsg-danger);padding:24px;">${err.message || 'Failed to load'}</td></tr>`;
+    }
+  }
+
   function renderHub() {
     const policy = state.policy;
     $('#hubTitle').textContent = policy ? policy.name : '';
@@ -350,6 +494,15 @@
         )
       );
     }
+    // My Submissions card
+    grid.appendChild(
+      el('div', { class: 'option-card', onclick: () => route('history') },
+        el('div', { class: 'icon-wrap', html: ICONS.receipt || ICONS.briefcase }),
+        el('h3', {}, 'My Submissions'),
+        el('p', {}, 'View your past claims and their approval status.'),
+        el('div', { class: 'arrow' }, el('span', {}, 'View'), el('div', { html: ICONS.arrow }))
+      )
+    );
     // Eligibility card last
     grid.appendChild(
       el('div', { class: 'option-card eligibility', onclick: () => route('eligibility') },
@@ -1458,7 +1611,7 @@
         el('td', {}, fmtDateShort(s.submitted_at)),
         el('td', {},
           el('div', { class: 'admin-actions' },
-            el('button', { class: 'view', onclick: () => window.open(`/api/submissions/${s.id}/pdf`, '_blank') }, 'View'),
+            el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
             el('button', { class: 'approve', onclick: () => approveSubmission(s) }, 'Approve'),
             el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, 'Reject')
           )
@@ -1498,8 +1651,7 @@
         el('td', {}, fmtDateShort(s.submitted_at)),
         el('td', {},
           el('div', { class: 'admin-actions' },
-            el('button', { class: 'view', onclick: () => window.open(`/api/submissions/${s.id}/pdf`, '_blank') },
-              s.status === 'approved' ? 'Download' : 'View'),
+            el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
             s.status === 'pending' ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, 'Approve') : null,
             s.status === 'pending' ? el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, 'Reject') : null
           )
@@ -1745,6 +1897,15 @@
   $('#submitFromPreview').addEventListener('click', () => submitForm());
   $('#backBtn') && $('#backBtn').addEventListener('click', goBack);
 
+  $('#historyRefreshBtn') && $('#historyRefreshBtn').addEventListener('click', renderHistory);
+
+  // Submission viewer modal
+  $('#viewClose') && $('#viewClose').addEventListener('click', () => $('#viewBackdrop').classList.remove('show'));
+  $('#viewBackdrop') && $('#viewBackdrop').addEventListener('click', (e) => { if (e.target.id === 'viewBackdrop') $('#viewBackdrop').classList.remove('show'); });
+  $('#viewDownload') && $('#viewDownload').addEventListener('click', () => {
+    if (viewCurrentId != null) window.open(`/api/submissions/${viewCurrentId}/pdf?download=1`, '_blank');
+  });
+
   // Admin panel events
   $('#addEmpBtn') && $('#addEmpBtn').addEventListener('click', () => openEmployeeModal(null));
   $('#empModalCancel') && $('#empModalCancel').addEventListener('click', closeEmployeeModal);
@@ -1757,6 +1918,15 @@
 
   // Admin tab switching
   $$('.admin-tab').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+  $('#adminRefreshBtn') && $('#adminRefreshBtn').addEventListener('click', async () => {
+    showLoading('Refreshing…');
+    try {
+      await Promise.all([loadPending(), loadSubmissions(), loadEmployees()]);
+      drawPendingTable(); drawSubmissionsTable(); drawEmployeeTable();
+      toast('Refreshed', 'success');
+    } catch (e) { toast('Refresh failed', 'error'); }
+    finally { hideLoading(); }
+  });
   // Pending + Submissions search / filter
   $('#pendSearch') && $('#pendSearch').addEventListener('input', drawPendingTable);
   $('#subSearch') && $('#subSearch').addEventListener('input', drawSubmissionsTable);

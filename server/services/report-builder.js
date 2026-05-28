@@ -32,6 +32,7 @@ async function buildReportPdf(sub, { draft = true } = {}) {
     attachments,
     formMeta: { title: meta.title, subtitle: meta.subtitle },
     outPath,
+    suppressAttachments: true,
   });
   return outPath;
 }

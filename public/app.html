@@ -191,6 +191,36 @@
   </div>
 </section>
 
+<!-- ============== MY SUBMISSIONS ============== -->
+<section class="page" id="page-history">
+  <div class="container">
+    <div class="form-header">
+      <div>
+        <div class="breadcrumb"><a data-nav="hub">Home</a></div>
+        <h2>My Submissions</h2>
+      </div>
+      <button class="btn btn-ghost" id="historyRefreshBtn" title="Refresh">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        Refresh
+      </button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden;">
+      <div style="overflow-x:auto;">
+        <table class="admin-table" id="historyTable">
+          <thead>
+            <tr>
+              <th>Reference</th><th>Form</th><th>Period</th>
+              <th style="text-align:right;">Amount</th><th>Status</th><th>Submitted</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ============== ADMIN PANEL ============== -->
 <section class="page" id="page-admin">
   <div class="container">
@@ -199,6 +229,10 @@
         <div class="breadcrumb"><a data-nav="hub">Home</a></div>
         <h2>Admin Panel</h2>
       </div>
+      <button class="btn btn-ghost" id="adminRefreshBtn" title="Refresh data">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        Refresh
+      </button>
     </div>
 
     <div class="admin-tabs">
@@ -356,6 +390,25 @@
     </div>
   </div>
 </div>
+
+<!-- ============== SUBMISSION VIEWER MODAL ============== -->
+<div class="modal-backdrop" id="viewBackdrop">
+  <div class="modal modal-wide" id="viewModal">
+    <div class="view-modal-head">
+      <div>
+        <div class="view-modal-ref" id="viewRef">—</div>
+        <h3 id="viewTitle" style="margin:2px 0 0;">Submission</h3>
+      </div>
+      <span class="status-pill" id="viewStatus">—</span>
+    </div>
+    <div class="view-modal-body" id="viewBody"></div>
+    <div class="actions">
+      <button class="btn btn-ghost" id="viewClose">Close</button>
+      <button class="btn btn-submit" id="viewDownload">Download PDF</button>
+    </div>
+  </div>
+</div>
+
 <div class="loading-overlay" id="loadingOverlay">
   <div class="spinner"></div>
   <div class="text" id="loadingText">Working…</div>

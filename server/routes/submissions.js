@@ -175,6 +175,7 @@ router.get('/:id', requireAuth, (req, res) => {
       id: sub.id, reference: sub.reference, company: sub.company,
       form_type: sub.form_type, period: sub.period, total_amount: sub.total_amount,
       status: sub.status, submitted_at: sub.submitted_at, email_sent_at: sub.email_sent_at,
+      reviewed_by: sub.reviewed_by, reviewed_at: sub.reviewed_at, review_note: sub.review_note,
       payload: JSON.parse(sub.payload_json || '{}'),
       employee: {
         name: sub.employee_name, email: sub.employee_email, code: sub.employee_code,

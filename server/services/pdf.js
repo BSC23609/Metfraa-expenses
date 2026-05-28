@@ -67,12 +67,13 @@ function formatPeriod(s) {
  * @param {string}   args.outPath      destination .pdf path
  * @returns {Promise<string>}          resolves with outPath when finished
  */
-function generatePdf({ submission, employee, payload, attachments = [], formMeta, outPath }) {
+function generatePdf({ submission, employee, payload, attachments = [], formMeta, outPath, suppressAttachments = false }) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({
         size: 'A4',
-        margins: { top: 50, bottom: 50, left: 50, right: 50 },
+        margins: { top: 80, bottom: 60, left: 50, right: 50 },
+        bufferPages: true,
         info: {
           Title: `${formMeta.title} — ${submission.reference}`,
           Author: 'Bharat Steel Group Portal',
@@ -84,6 +85,23 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
       doc.pipe(stream);
       stream.on('finish', () => resolve(outPath));
       stream.on('error', reject);
+
+      // Register bundled DejaVu fonts (they include the ₹ glyph, which the
+      // built-in Helvetica lacks) under the standard names, so every
+      // existing .font('Helvetica'/'Helvetica-Bold'/'Helvetica-Oblique')
+      // call picks them up without change.
+      try {
+        const FONT_DIR = path.join(__dirname, '..', 'assets', 'fonts');
+        const reg = path.join(FONT_DIR, 'DejaVuSans.ttf');
+        const bold = path.join(FONT_DIR, 'DejaVuSans-Bold.ttf');
+        if (fs.existsSync(reg)) {
+          doc.registerFont('Helvetica', reg);
+          doc.registerFont('Helvetica-Oblique', reg);
+        }
+        if (fs.existsSync(bold)) {
+          doc.registerFont('Helvetica-Bold', bold);
+        }
+      } catch (_) { /* fall back to built-in if anything goes wrong */ }
 
       // -- Page header (every page) ---------------------------------
       const drawHeader = () => {
@@ -112,9 +130,16 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
           50, y + 8, { width: doc.page.width - 100, align: 'right' });
       };
 
-      doc.on('pageAdded', () => { drawHeader(); });
+      doc.on('pageAdded', () => {
+        drawHeader();
+        // Start content below the header band so it never overlaps, and so
+        // PDFKit's auto-flow doesn't cascade into spurious blank pages.
+        doc.x = doc.page.margins.left;
+        doc.y = 80;
+      });
 
       drawHeader();
+      doc.y = 80;
 
       // -- Title block -----------------------------------------------
       doc.moveDown(2.5);
@@ -197,7 +222,10 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
       doc.y = sigY + 40;
 
       // -- Attachments / bills --------------------------------------
-      if (attachments.length) {
+      // When the bills will be MERGED into this PDF afterwards (the normal
+      // path), skip the report's own placeholder attachment section to
+      // avoid duplicate "Supporting Documents" pages and blank-page bloat.
+      if (attachments.length && !suppressAttachments) {
         doc.addPage();
         doc.fontSize(9).fillColor(MUTED).font('Helvetica')
            .text('SUPPORTING DOCUMENTS', { characterSpacing: 1.4 });
@@ -217,17 +245,23 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
       const range = doc.bufferedPageRange();
       for (let i = range.start; i < range.start + range.count; i++) {
         doc.switchToPage(i);
-        // footer
+        // Drawing near the page bottom would otherwise exceed the bottom
+        // margin and make PDFKit add a blank page — neutralise the margin
+        // for the footer draw.
+        const savedBottom = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
         const y = doc.page.height - FOOT_HEIGHT;
         doc.lineWidth(0.5).strokeColor(LINE)
            .moveTo(50, y).lineTo(doc.page.width - 50, y).stroke();
         doc.fontSize(8).fillColor(MUTED).font('Helvetica')
            .text(`Ref ${submission.reference}  ·  Generated ${new Date().toLocaleString('en-IN')}`,
-                 50, y + 8, { width: doc.page.width - 100, align: 'left' });
+                 50, y + 8, { width: doc.page.width - 100, align: 'left', lineBreak: false });
         doc.fontSize(8).fillColor(MUTED).font('Helvetica')
            .text(`Page ${i - range.start + 1} of ${range.count}`,
-                 50, y + 8, { width: doc.page.width - 100, align: 'right' });
+                 50, y + 8, { width: doc.page.width - 100, align: 'right', lineBreak: false });
+        doc.page.margins.bottom = savedBottom;
       }
+      doc.flushPages();
 
       doc.end();
     } catch (err) {
@@ -313,10 +347,10 @@ function table(doc, headers, rows, colWidths, opts = {}) {
 }
 
 function sectionHeading(doc, text) {
-  if (doc.y > doc.page.height - 140) doc.addPage();
+  if (doc.y > doc.page.height - 160) doc.addPage();
   doc.moveDown(0.5);
-  doc.fontSize(7).fillColor(BLUE).font('Helvetica-Bold')
-     .text(text.toUpperCase(), { characterSpacing: 1.6 });
+  doc.fontSize(8).fillColor(BLUE).font('Helvetica-Bold')
+     .text(text.toUpperCase(), 50, doc.y, { characterSpacing: 0.4, width: doc.page.width - 100, lineBreak: false, ellipsis: true });
   doc.moveTo(50, doc.y + 2).lineTo(doc.page.width - 50, doc.y + 2)
      .strokeColor(LINE).lineWidth(0.5).stroke();
   doc.moveDown(0.7);
