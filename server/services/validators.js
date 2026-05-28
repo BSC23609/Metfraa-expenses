@@ -124,6 +124,9 @@ function validateMetLocal(input, employee) {
     const km = parseFloat(t.km);
     if (!(km > 0))      return err('Each trip needs a positive KM value');
     if (km < 5)         return err('Trips under 5 km are not eligible per policy');
+    // Car travel is only reimbursable for longer journeys (80 km+).
+    const isCar = /car/i.test(input.vehicle_type) || /car/i.test(rate.label || '');
+    if (isCar && km < 80) return err(`Car travel is not applicable for trips under 80 km (this trip is ${km} km). Use a two-wheeler for shorter distances.`);
     const amount = +(km * rate.rate_per_km).toFixed(2);
     total += amount;
     cleanTrips.push({
@@ -144,28 +147,38 @@ function validateMetLocal(input, employee) {
   }, +total.toFixed(2));
 }
 
-// ---- Metfraa: Cab Request (pre-approval, no amount) ---------------
+// ---- Metfraa: Cab Reimbursement (fare-based, 80 km+) -------------
 function validateMetCab(input, employee) {
   const formMeta = getForm('metfraa', 'cab');
   if (!formMeta) return err('Policy missing for metfraa/cab');
-  if (!Array.isArray(input.rides) || !input.rides.length) return err('At least one ride request is required');
+  if (!Array.isArray(input.rides) || !input.rides.length) return err('At least one cab trip is required');
+  const MIN_KM = (formMeta.min_km != null) ? formMeta.min_km : 80;
+  let total = 0;
   const rides = [];
   for (const r of input.rides) {
-    if (!isDate(r.date))   return err('Each ride needs a date');
-    if (!isStr(r.pickup))  return err('Each ride needs a pickup location');
-    if (!isStr(r.drop))    return err('Each ride needs a drop location');
-    if (!isStr(r.purpose)) return err('Each ride needs a purpose');
+    if (!isDate(r.date))   return err('Each cab trip needs a date');
+    if (!isStr(r.pickup))  return err('Each cab trip needs a pickup location');
+    if (!isStr(r.drop))    return err('Each cab trip needs a drop location');
+    if (!isStr(r.purpose)) return err('Each cab trip needs a purpose');
+    const km = parseFloat(r.km);
+    if (!(km > 0))         return err('Each cab trip needs a positive distance (km)');
+    if (km < MIN_KM)       return err(`Cab reimbursement is not applicable for trips under ${MIN_KM} km (this trip is ${km} km).`);
+    const fare = parseFloat(r.fare);
+    if (!(fare > 0))       return err('Each cab trip needs the fare amount paid (₹)');
+    total += fare;
     rides.push({
       date: r.date,
       time: isStr(r.time) ? r.time.trim() : '',
       pickup: r.pickup.trim(),
       drop: r.drop.trim(),
+      km,
+      fare: +fare.toFixed(2),
       passengers: r.passengers ? String(r.passengers).trim() : '1',
       purpose: r.purpose.trim(),
       notes: isStr(r.notes) ? r.notes.trim() : '',
     });
   }
-  return ok({ rides, period: input.period || '' }, 0);
+  return ok({ rides, period: input.period || '' }, +total.toFixed(2));
 }
 
 // ---- Metfraa: Monthly Accommodation -------------------------------
@@ -253,6 +266,22 @@ function validateMetOutstation(input, employee) {
   }, +total.toFixed(2));
 }
 
+// ---- Metfraa: Miscellaneous Reimbursement -------------------------
+function validateMetMisc(input, employee) {
+  if (!Array.isArray(input.items) || !input.items.length) return err('At least one item is required');
+  let total = 0;
+  const items = [];
+  for (const it of input.items) {
+    if (!isDate(it.date))    return err('Each item needs a date');
+    if (!isStr(it.purpose))  return err('Each item needs a purpose');
+    const amount = parseFloat(it.amount);
+    if (!(amount > 0))       return err('Each item needs a positive amount (₹)');
+    total += amount;
+    items.push({ date: it.date, purpose: it.purpose.trim(), amount: +amount.toFixed(2) });
+  }
+  return ok({ items, period: input.period || '' }, +total.toFixed(2));
+}
+
 const VALIDATORS = {
   bsc_conveyance:    validateBscConveyance,
   bsc_expense:       validateBscExpense,
@@ -260,15 +289,17 @@ const VALIDATORS = {
   met_cab:           validateMetCab,
   met_accommodation: validateMetAccommodation,
   met_outstation:    validateMetOutstation,
+  met_misc:          validateMetMisc,
 };
 
 const FORM_META = {
   bsc_conveyance:    { company: 'bsc',     title: 'Local Travel Conveyance',         subtitle: 'BSC / Form C',  policyForm: 'conveyance' },
   bsc_expense:       { company: 'bsc',     title: 'Travel Expense Reimbursement',    subtitle: 'BSC / Form E',  policyForm: 'expense' },
   met_local:         { company: 'metfraa', title: 'Local Travel Allowance',           subtitle: 'Metfraa / LTA', policyForm: 'local' },
-  met_cab:           { company: 'metfraa', title: 'Cab Request',                      subtitle: 'Metfraa / CAB', policyForm: 'cab' },
+  met_cab:           { company: 'metfraa', title: 'Cab Reimbursement',                subtitle: 'Metfraa / CAB', policyForm: 'cab' },
   met_accommodation: { company: 'metfraa', title: 'Monthly Accommodation Reimbursement', subtitle: 'Metfraa / ACC', policyForm: 'accommodation' },
   met_outstation:    { company: 'metfraa', title: 'Outstation Travel Reimbursement',  subtitle: 'Metfraa / OUT', policyForm: 'outstation' },
+  met_misc:          { company: 'metfraa', title: 'Miscellaneous Reimbursement',      subtitle: 'Metfraa / MISC', policyForm: 'misc' },
 };
 
 function validate(formType, input, employee) {

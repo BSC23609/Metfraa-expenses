@@ -174,19 +174,27 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
             { width: doc.page.width - 100 - 20, align: 'right' });
       doc.y = banY + banH + 24;
 
-      // -- Signature row ---------------------------------------------
-      if (doc.y > doc.page.height - 140) doc.addPage();
-      const sigY = doc.y + 30;
-      const halfW = (doc.page.width - 100 - 30) / 2;
-      doc.lineWidth(0.7).strokeColor(INK)
-         .moveTo(50, sigY).lineTo(50 + halfW, sigY).stroke()
-         .moveTo(50 + halfW + 30, sigY).lineTo(doc.page.width - 50, sigY).stroke();
-      doc.fontSize(10).fillColor(INK).font('Helvetica')
-         .text(employee.name || '', 50, sigY + 4, { width: halfW });
-      doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
-         .text('EMPLOYEE SIGNATURE · DATE', 50, sigY + 20, { characterSpacing: 1.2 });
-      doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
-         .text('AUTHORISED BY · DATE', 50 + halfW + 30, sigY + 20, { characterSpacing: 1.2 });
+      // -- Signature row: Employee · Checked By · Approved By --------
+      if (doc.y > doc.page.height - 160) doc.addPage();
+      const sigY = doc.y + 40;
+      const gap = 24;
+      const sigColW = (doc.page.width - 100 - gap * 2) / 3;
+      const cols = [
+        { x: 50,                       name: employee.name || '', label: 'EMPLOYEE · DATE' },
+        { x: 50 + sigColW + gap,       name: '',                  label: 'CHECKED BY · DATE' },
+        { x: 50 + (sigColW + gap) * 2, name: '',                  label: 'APPROVED BY · DATE' },
+      ];
+      cols.forEach(c => {
+        doc.lineWidth(0.7).strokeColor(INK)
+           .moveTo(c.x, sigY).lineTo(c.x + sigColW, sigY).stroke();
+        if (c.name) {
+          doc.fontSize(10).fillColor(INK).font('Helvetica')
+             .text(c.name, c.x, sigY + 4, { width: sigColW });
+        }
+        doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
+           .text(c.label, c.x, sigY + 20, { characterSpacing: 1.1, width: sigColW });
+      });
+      doc.y = sigY + 40;
 
       // -- Attachments / bills --------------------------------------
       if (attachments.length) {
@@ -239,6 +247,7 @@ function renderBody(doc, sub, payload, formMeta) {
     case 'met_cab':              return renderMetCab(doc, payload);
     case 'met_accommodation':    return renderMetAccommodation(doc, payload);
     case 'met_outstation':       return renderMetOutstation(doc, payload);
+    case 'met_misc':             return renderMetMisc(doc, payload);
     default:
       doc.fontSize(11).fillColor(INK).text(JSON.stringify(payload, null, 2));
   }
@@ -380,17 +389,27 @@ function renderMetLocal(doc, p) {
 
 // ---- Metfraa: Cab Request -----------------------------------------
 function renderMetCab(doc, p) {
-  sectionHeading(doc, 'Cab Request — Pre-Approval');
+  sectionHeading(doc, 'Cab Reimbursement — Trips 80 km+');
   const rows = (p.rides || []).map(r => ([
-    formatDate(r.date) + (r.time ? `\n${r.time}` : ''),
-    r.pickup, r.drop, r.passengers || '1',
-    r.purpose || '—', r.notes || '—'
+    formatDate(r.date),
+    r.pickup, r.drop,
+    `${r.km || '—'} km`,
+    `₹ ${fmt(parseFloat(r.fare) || 0)}`,
+    r.purpose || '—',
   ]));
-  table(doc, ['Date / Time', 'Pickup', 'Drop', 'Pax', 'Purpose', 'Notes'], rows,
-    [80, 90, 90, 35, 110, 90]);
-  doc.moveDown(0.6);
-  doc.fontSize(9).fillColor(MUTED).font('Helvetica-Oblique')
-     .text('This is a pre-approval request. Bookings should not be made before HR / manager approval.');
+  table(doc, ['Date', 'Pickup', 'Drop', 'Distance', 'Fare', 'Purpose'], rows,
+    [70, 95, 95, 60, 70, 105], { numericCols: [4] });
+}
+
+// ---- Metfraa: Miscellaneous Reimbursement -------------------------
+function renderMetMisc(doc, p) {
+  sectionHeading(doc, `Miscellaneous Reimbursement · ${(p.items || []).length} item(s)`);
+  const rows = (p.items || []).map(it => ([
+    formatDate(it.date),
+    it.purpose || '—',
+    `₹ ${fmt(parseFloat(it.amount) || 0)}`,
+  ]));
+  table(doc, ['Date', 'Purpose', 'Amount'], rows, [90, 290, 95], { numericCols: [2] });
 }
 
 // ---- Metfraa: Monthly Accommodation -------------------------------

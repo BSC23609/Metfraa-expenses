@@ -724,12 +724,16 @@ body::after {
 /* Per-form row column templates */
 .row-conv      { grid-template-columns: 110px 1.1fr 1.1fr 1fr 70px 110px 36px; }
 .col-conv      { grid-template-columns: 110px 1.1fr 1.1fr 1fr 70px 110px 36px; }
-.row-cab       { grid-template-columns: 110px 90px 1fr 1fr 50px 1.2fr 36px; }
-.col-cab       { grid-template-columns: 110px 90px 1fr 1fr 50px 1.2fr 36px; }
+.row-cab       { grid-template-columns: 110px 1fr 1fr 90px 90px 1.1fr 36px; }
+.col-cab       { grid-template-columns: 110px 1fr 1fr 90px 90px 1.1fr 36px; }
 .row-acc       { grid-template-columns: 110px 1fr 1fr 100px 100px 36px; }
 .col-acc       { grid-template-columns: 110px 1fr 1fr 100px 100px 36px; }
 .row-exp       { grid-template-columns: 110px 1fr 110px 36px; }
 .col-exp       { grid-template-columns: 110px 1fr 110px 36px; }
+.row-misc      { grid-template-columns: 130px 1fr 130px 36px; }
+.col-misc      { grid-template-columns: 130px 1fr 130px 36px; }
+/* inline per-row warnings span the whole row width */
+.row .od-warn  { grid-column: 1 / -1; }
 
 .add-row-btn {
   background: transparent;
@@ -1731,3 +1735,28 @@ body::after {
 .method-badge.microsoft { background: rgba(0,164,239,0.12); color: #0a6ebd; }
 .method-badge.google    { background: rgba(66,133,244,0.12); color: #2a62c9; }
 .method-badge.password  { background: rgba(180,83,9,0.12); color: var(--bsg-warning); }
+
+/* ===================================================================
+   TOPBAR BACK BUTTON
+   =================================================================== */
+.topbar-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin-right: 6px;
+  border: 1px solid var(--bsg-line);
+  background: #fff;
+  color: var(--bsg-ink);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  flex-shrink: 0;
+}
+.topbar-back:hover {
+  background: var(--bsg-ink);
+  color: #fff;
+  border-color: var(--bsg-ink);
+  transform: translateX(-2px);
+}

@@ -141,9 +141,10 @@ function cap(s) { return String(s).charAt(0).toUpperCase() + String(s).slice(1);
 function formTitle(t) {
   return ({
     met_local: 'Local Travel Allowance',
-    met_cab: 'Cab Request',
+    met_cab: 'Cab Reimbursement',
     met_accommodation: 'Monthly Accommodation',
     met_outstation: 'Outstation Travel',
+    met_misc: 'Miscellaneous Reimbursement',
     bsc_conveyance: 'Local Conveyance',
     bsc_expense: 'Travel Expense',
   })[t] || t;

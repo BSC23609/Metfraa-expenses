@@ -23,6 +23,7 @@
     adminEmployees: [],      // cached employee list for the admin panel
     adminPending: [],        // pending submissions
     adminSubmissions: [],    // all submissions
+    currentPage: null,       // for the global Back button history
   };
 
   // ----- Constants ------------------------------------------------
@@ -38,9 +39,10 @@
     ],
     metfraa: [
       { key: 'met_local',         title: 'Local Travel Allowance',           desc: 'Site / official travel using personal vehicle.', icon: 'bike' },
-      { key: 'met_cab',           title: 'Cab Request',                       desc: 'Pre-approval request for company-arranged cab/taxi.', icon: 'taxi' },
+      { key: 'met_cab',           title: 'Cab Reimbursement',                 desc: 'Cab / taxi fare reimbursement for trips of 80 km or more.', icon: 'taxi' },
       { key: 'met_accommodation', title: 'Monthly Accommodation Reimbursement', desc: 'Site accommodation reimbursement.', icon: 'building' },
       { key: 'met_outstation',    title: 'Outstation Travel Reimbursement',  desc: 'Inter-city official travel.', icon: 'briefcase' },
+      { key: 'met_misc',          title: 'Miscellaneous Reimbursements',      desc: 'Any other work expense — date, purpose, amount + bill.', icon: 'receipt' },
     ],
   };
 
@@ -49,6 +51,7 @@
     taxi: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 4h8l3 5H5l3-5z"/><path d="M3 14h18v4H3z"/><circle cx="7" cy="18" r="1.5" fill="currentColor"/><circle cx="17" cy="18" r="1.5" fill="currentColor"/><path d="M10 4V2h4v2"/></svg>',
     building: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="18"/><path d="M9 8h2M13 8h2M9 12h2M13 12h2M9 16h2M13 16h2"/></svg>',
     briefcase: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="13" rx="1"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2M3 13h18"/></svg>',
+    receipt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 2v20l2-1.5L8 22l2-1.5L12 22l2-1.5L16 22l2-1.5L20 22V2l-2 1.5L16 2l-2 1.5L12 2l-2 1.5L8 2 6 3.5 4 2z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
     policy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6M9 9h2"/></svg>',
     arrow: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 5l7 7-7 7"/></svg>',
   };
@@ -249,16 +252,37 @@
     admin:       renderAdmin,
   };
 
+  // Navigation history for the global Back button.
+  const navHistory = [];
+
   function route(name, opts = {}) {
     // Metfraa-only: redirect any 'landing' nav to the hub.
     if (name === 'landing') name = 'hub';
+
+    // Maintain a simple back-stack. Don't push duplicates or back-nav itself.
+    if (!opts._back) {
+      const current = state.currentPage;
+      if (current && current !== name) navHistory.push(current);
+    }
+    state.currentPage = name;
+
     $$('.page').forEach(p => p.classList.remove('active'));
     const page = $('#page-' + name);
     if (!page) return;
     page.classList.add('active');
     setCompanyLogoInTopbar(true);
+
+    // Show Back everywhere except the hub (home). Hidden when nothing to go back to.
+    const backBtn = $('#backBtn');
+    if (backBtn) backBtn.style.display = (name !== 'hub' && navHistory.length) ? 'inline-flex' : 'none';
+
     if (routes[name]) routes[name](opts);
     window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+
+  function goBack() {
+    const prev = navHistory.pop();
+    route(prev || 'hub', { _back: true });
   }
 
   // ===================================================================
@@ -395,7 +419,7 @@
       case 'met_cab':
         return {
           period,
-          rides: [{ date: '', time: '', pickup: '', drop: '', passengers: 1, purpose: '', notes: '' }],
+          rides: [{ date: '', time: '', pickup: '', drop: '', km: '', fare: '', passengers: 1, purpose: '', notes: '' }],
         };
       case 'met_accommodation':
         return {
@@ -404,6 +428,8 @@
         };
       case 'met_outstation':
         return { period, trips: [emptyOutstationTrip()] };
+      case 'met_misc':
+        return { period, items: [{ date: '', purpose: '', amount: '' }] };
     }
   }
 
@@ -412,9 +438,10 @@
     bsc_conveyance: 'Local Travel Conveyance',
     bsc_expense:    'Travel Expense Reimbursement',
     met_local:      'Local Travel Allowance',
-    met_cab:        'Cab Request',
+    met_cab:        'Cab Reimbursement',
     met_accommodation: 'Monthly Accommodation Reimbursement',
     met_outstation: 'Outstation Travel Reimbursement',
+    met_misc:       'Miscellaneous Reimbursements',
   };
 
   function renderForm() {
@@ -425,10 +452,9 @@
     // entitlement banner per form
     renderEntitlementBanner();
 
-    // toggle upload zone (cab request doesn't need bills)
-    const showUploads = state.currentForm !== 'met_cab';
-    $('#uploadSection').style.display = showUploads ? '' : 'none';
-    $('#summaryBar').style.display = state.currentForm === 'met_cab' ? 'none' : '';
+    // Cab is now a reimbursement (has a total + bills), so show both.
+    $('#uploadSection').style.display = '';
+    $('#summaryBar').style.display = '';
 
     switch (state.currentForm) {
       case 'bsc_conveyance': renderConveyanceForm(body, 'bsc'); break;
@@ -436,6 +462,7 @@
       case 'bsc_expense':    renderExpenseForm(body, 'bsc'); break;
       case 'met_outstation': renderExpenseForm(body, 'metfraa'); break;
       case 'met_cab':        renderCabForm(body); break;
+      case 'met_misc':       renderMiscForm(body); break;
       case 'met_accommodation': renderAccommodationForm(body); break;
     }
 
@@ -460,7 +487,7 @@
       value = 'Bike <strong>₹3.5/km</strong>  ·  Car <strong>₹5/km</strong>';
     } else if (F === 'met_local') {
       label = 'Rates';
-      value = 'Bike <strong>₹4/km</strong>  ·  Car <strong>₹10/km</strong>  ·  Min trip <strong>5 km</strong>';
+      value = 'Bike <strong>₹4/km</strong>  ·  Car <strong>₹10/km</strong>  ·  Min trip <strong>5 km</strong>  ·  Car only for <strong>80 km+</strong>';
     } else if (F === 'bsc_expense') {
       const e = state.policy.forms.expense.per_level[lvl];
       if (e) value = `Food <strong>₹${fmt(e.food_per_day)}/day</strong>  ·  Accom <strong>₹${fmt(e.accommodation_per_day)}/day</strong>  ·  ${e.long_distance.join(' / ')}`;
@@ -474,8 +501,11 @@
       if (e) value = `Daily limit <strong>₹${fmt(e.daily_limit)}/day</strong>  ·  Economical accommodation mandatory`;
       label = `Level ${lvl} entitlement`;
     } else if (F === 'met_cab') {
-      label = 'Pre-Approval';
-      value = 'Manager approval required before booking. Submit at least 24 hours in advance.';
+      label = 'Eligibility';
+      value = 'Applicable for trips <strong>80 km+</strong> only  ·  attach the cab/taxi bill';
+    } else if (F === 'met_misc') {
+      label = 'Reimbursement';
+      value = 'Enter each expense with date, purpose &amp; amount  ·  attach the bill for each';
     }
 
     if (!value) return;
@@ -534,20 +564,46 @@
     tripsCard.appendChild(colHeader);
 
     const rate = rates[fd.vehicle_type].rate_per_km;
+    const vLabel = (rates[fd.vehicle_type].label || '') + ' ' + fd.vehicle_type;
+    const isCar = company === 'metfraa' && /car/i.test(vLabel);
     fd.trips.forEach((t, idx) => {
       // Compute amount
       const km = parseFloat(t.km) || 0;
       t.amount = +(km * rate).toFixed(2);
+      const carShort = isCar && km > 0 && km < 80;
 
-      const row = el('div', { class: 'row row-conv' },
+      const amountCell = el('input', {
+        type: 'text', value: `₹ ${fmt(t.amount)}`, readOnly: true,
+        class: 'ti', tabindex: '-1',
+      });
+      const row = el('div', { class: 'row row-conv' + (carShort ? ' error' : '') },
         rowInput('date', t.date, v => { t.date = v; updateSummary(); }),
         rowInput('text', t.from, v => { t.from = v; }, 'From'),
         rowInput('text', t.to,   v => { t.to = v; }, 'To'),
         rowInput('text', t.purpose, v => { t.purpose = v; }, 'Purpose'),
-        rowInput('number', t.km, v => { t.km = v; renderForm(); }, '0', { step: '0.1', min: '0' }),
-        rowInput('text', `₹ ${fmt(t.amount)}`, () => {}, '', { readOnly: true }),
+        // Update km + recompute this row's amount IN PLACE — no full
+        // re-render, so the cursor stays in the field (bug fix).
+        rowInput('number', t.km, v => {
+          t.km = v;
+          const k = parseFloat(v) || 0;
+          t.amount = +(k * rate).toFixed(2);
+          amountCell.value = `₹ ${fmt(t.amount)}`;
+          // car-under-80 warning, toggled in place
+          const bad = isCar && k > 0 && k < 80;
+          row.classList.toggle('error', bad);
+          let warn = row.querySelector('.car-warn');
+          if (bad) {
+            if (!warn) { warn = el('div', { class: 'car-warn od-warn', style: 'grid-column:1/-1;' }, ''); row.appendChild(warn); }
+            warn.textContent = `Car travel needs 80 km+ — this trip is ${k} km. Use a two-wheeler for shorter distances.`;
+          } else if (warn) { warn.remove(); }
+          updateSummary();
+        }, '0', { step: '0.1', min: '0' }),
+        amountCell,
         removeRowBtn(() => { fd.trips.splice(idx, 1); if (!fd.trips.length) fd.trips.push({ date:'', from:'', to:'', purpose:'', km:'' }); renderForm(); })
       );
+      if (carShort) {
+        row.appendChild(el('div', { class: 'car-warn od-warn', style: 'grid-column:1/-1;' }, `Car travel needs 80 km+ — this trip is ${km} km. Use a two-wheeler for shorter distances.`));
+      }
       tripsCard.appendChild(row);
     });
 
@@ -659,11 +715,20 @@
     }, '+ Add Another Trip'));
   }
 
-  // ---- Cab Request -----------------------------------------------
+  // ---- Cab Reimbursement -----------------------------------------
   function renderCabForm(body) {
     const fd = state.formData;
+
+    // Eligibility notice
+    body.appendChild(el('div', { class: 'card', style: 'border-left:3px solid var(--bsg-warning);' },
+      el('div', { class: 'card-title' }, 'Eligibility'),
+      el('p', { style: 'margin:0;color:var(--bsg-text);line-height:1.6;' },
+        'Cab reimbursement applies only to journeys of ', el('strong', {}, '80 km or more'),
+        '. Shorter trips are not eligible. Attach the cab/taxi bill for each fare claimed.')
+    ));
+
     const periodCard = el('div', { class: 'card' },
-      el('div', { class: 'card-title' }, 'Request Period (optional)'),
+      el('div', { class: 'card-title' }, 'Reference Month (optional)'),
       el('div', { class: 'field-grid' },
         field('period', 'Reference Month', 'month', fd.period, false, v => { fd.period = v; })
       )
@@ -671,28 +736,76 @@
     body.appendChild(periodCard);
 
     const ridesCard = el('div', { class: 'card' },
-      el('div', { class: 'card-title' }, 'Ride Request(s)')
+      el('div', { class: 'card-title' }, 'Cab Trip(s)')
     );
     ridesCard.appendChild(el('div', { class: 'col-header col-cab' },
-      el('div', {}, 'Date'), el('div', {}, 'Time'), el('div', {}, 'Pickup'),
-      el('div', {}, 'Drop'), el('div', {}, 'Pax'), el('div', {}, 'Purpose / Notes'), el('div', {}, '')
+      el('div', {}, 'Date'), el('div', {}, 'Pickup'), el('div', {}, 'Drop'),
+      el('div', {}, 'Distance (km)'), el('div', {}, 'Fare (₹)'), el('div', {}, 'Purpose'), el('div', {}, '')
     ));
 
     fd.rides.forEach((r, idx) => {
-      const row = el('div', { class: 'row row-cab' },
+      const km = parseFloat(r.km) || 0;
+      const ineligible = km > 0 && km < 80;
+      const row = el('div', { class: 'row row-cab' + (ineligible ? ' error' : '') },
         rowInput('date', r.date, v => { r.date = v; }),
-        rowInput('time', r.time, v => { r.time = v; }),
         rowInput('text', r.pickup, v => { r.pickup = v; }, 'Pickup point'),
         rowInput('text', r.drop, v => { r.drop = v; }, 'Drop point'),
-        rowInput('number', r.passengers || 1, v => { r.passengers = v; }, '1', { min: '1' }),
+        rowInput('number', r.km, v => {
+          r.km = v;
+          const k = parseFloat(v) || 0;
+          row.classList.toggle('error', k > 0 && k < 80);
+          // toggle the inline warning
+          let warn = row.querySelector('.cab-warn');
+          if (k > 0 && k < 80) {
+            if (!warn) { warn = el('div', { class: 'cab-warn od-warn', style: 'grid-column:1/-1;' }, ''); row.appendChild(warn); }
+            warn.textContent = `Not eligible — ${k} km is under the 80 km minimum.`;
+          } else if (warn) { warn.remove(); }
+          updateSummary();
+        }, '0', { step: '0.1', min: '0' }),
+        rowInput('number', r.fare, v => { r.fare = v; updateSummary(); }, '0.00', { step: '0.01', min: '0' }),
         rowInput('text', r.purpose, v => { r.purpose = v; }, 'Purpose'),
-        removeRowBtn(() => { fd.rides.splice(idx, 1); if (!fd.rides.length) fd.rides.push({ date:'', time:'', pickup:'', drop:'', passengers:1, purpose:'', notes:'' }); renderForm(); })
+        removeRowBtn(() => { fd.rides.splice(idx, 1); if (!fd.rides.length) fd.rides.push({ date:'', time:'', pickup:'', drop:'', km:'', fare:'', passengers:1, purpose:'', notes:'' }); renderForm(); })
       );
+      if (ineligible) {
+        row.appendChild(el('div', { class: 'cab-warn od-warn', style: 'grid-column:1/-1;' }, `Not eligible — ${km} km is under the 80 km minimum.`));
+      }
       ridesCard.appendChild(row);
     });
 
-    ridesCard.appendChild(el('button', { class: 'add-row-btn', onclick: () => { fd.rides.push({ date:'', time:'', pickup:'', drop:'', passengers:1, purpose:'', notes:'' }); renderForm(); } }, '+ Add Another Ride Request'));
+    ridesCard.appendChild(el('button', { class: 'add-row-btn', onclick: () => { fd.rides.push({ date:'', time:'', pickup:'', drop:'', km:'', fare:'', passengers:1, purpose:'', notes:'' }); renderForm(); } }, '+ Add Another Cab Trip'));
     body.appendChild(ridesCard);
+  }
+
+  // ---- Miscellaneous Reimbursement -------------------------------
+  function renderMiscForm(body) {
+    const fd = state.formData;
+
+    body.appendChild(el('div', { class: 'card' },
+      el('div', { class: 'card-title' }, 'Reference Month (optional)'),
+      el('div', { class: 'field-grid' },
+        field('period', 'Reference Month', 'month', fd.period, false, v => { fd.period = v; })
+      )
+    ));
+
+    const itemsCard = el('div', { class: 'card' },
+      el('div', { class: 'card-title' }, 'Items')
+    );
+    itemsCard.appendChild(el('div', { class: 'col-header col-misc' },
+      el('div', {}, 'Date'), el('div', {}, 'Purpose'), el('div', {}, 'Amount (₹)'), el('div', {}, '')
+    ));
+
+    fd.items.forEach((it, idx) => {
+      const row = el('div', { class: 'row row-misc' },
+        rowInput('date', it.date, v => { it.date = v; updateSummary(); }),
+        rowInput('text', it.purpose, v => { it.purpose = v; }, 'What was this expense for?'),
+        rowInput('number', it.amount, v => { it.amount = v; updateSummary(); }, '0.00', { step: '0.01', min: '0' }),
+        removeRowBtn(() => { fd.items.splice(idx, 1); if (!fd.items.length) fd.items.push({ date:'', purpose:'', amount:'' }); renderForm(); })
+      );
+      itemsCard.appendChild(row);
+    });
+
+    itemsCard.appendChild(el('button', { class: 'add-row-btn', onclick: () => { fd.items.push({ date:'', purpose:'', amount:'' }); renderForm(); } }, '+ Add Item'));
+    body.appendChild(itemsCard);
   }
 
   // ---- Monthly Accommodation -------------------------------------
@@ -725,7 +838,12 @@
         rowInput('text', e.location, v => { e.location = v; }, 'City / Site'),
         rowInput('text', e.hotel, v => { e.hotel = v; }, 'Hotel / lodge name'),
         rowInput('text', e.bill_no, v => { e.bill_no = v; }, 'Bill no.'),
-        rowInput('number', e.amount, v => { e.amount = v; updateSummary(); renderForm(); }, '0.00', { step: '0.01', min: '0' }),
+        rowInput('number', e.amount, v => {
+          e.amount = v;
+          // toggle the over-limit highlight in place (no re-render → keeps cursor)
+          row.classList.toggle('error', (parseFloat(v) || 0) > limit);
+          updateSummary();
+        }, '0.00', { step: '0.01', min: '0' }),
         removeRowBtn(() => { fd.entries.splice(idx, 1); if (!fd.entries.length) fd.entries.push({ date:'', location:'', hotel:'', bill_no:'', amount:'' }); renderForm(); })
       );
       entriesCard.appendChild(row);
@@ -797,7 +915,16 @@
         }
         break;
       case 'met_cab':
-        count = fd.rides.filter(r => r.pickup && r.drop).length;
+        for (const r of fd.rides) {
+          const f = parseFloat(r.fare) || 0;
+          if (f > 0) { total += f; count++; }
+        }
+        break;
+      case 'met_misc':
+        for (const it of fd.items) {
+          const a = parseFloat(it.amount) || 0;
+          if (a > 0) { total += a; count++; }
+        }
         break;
     }
     return { total: +total.toFixed(2), count };
@@ -908,6 +1035,14 @@
       if (!fd.period) fail('Period is required.');
       if (!fd.trips.some(t => t.date && t.from && t.to && parseFloat(t.km) > 0)) fail('Add at least one complete trip.');
       if (F === 'met_local' && fd.trips.some(t => t.km && parseFloat(t.km) < 5)) fail('Trips under 5 km are not eligible per Metfraa policy.');
+      // Car only for 80 km+
+      if (F === 'met_local') {
+        const rates = state.policy.forms.local.rates;
+        const vLabel = (rates[fd.vehicle_type].label || '') + ' ' + fd.vehicle_type;
+        if (/car/i.test(vLabel) && fd.trips.some(t => t.km && parseFloat(t.km) < 80)) {
+          fail('Car travel is not applicable for trips under 80 km. Use a two-wheeler for shorter distances.');
+        }
+      }
     } else if (F === 'bsc_expense' || F === 'met_outstation') {
       if (!fd.period) fail('Reporting month is required.');
       if (!fd.trips.length) fail('Add at least one trip.');
@@ -923,7 +1058,16 @@
         }
       }
     } else if (F === 'met_cab') {
-      if (!fd.rides.some(r => r.date && r.pickup && r.drop && r.purpose)) fail('Add at least one complete ride request.');
+      if (!fd.rides.some(r => r.date && r.pickup && r.drop && r.purpose && parseFloat(r.km) > 0 && parseFloat(r.fare) > 0)) {
+        fail('Add at least one complete cab trip (date, pickup, drop, distance, fare, purpose).');
+      }
+      if (fd.rides.some(r => r.km && parseFloat(r.km) < 80)) {
+        fail('Cab reimbursement is not applicable for trips under 80 km.');
+      }
+    } else if (F === 'met_misc') {
+      if (!fd.items.some(it => it.date && it.purpose && parseFloat(it.amount) > 0)) {
+        fail('Add at least one complete item (date, purpose, amount).');
+      }
     } else if (F === 'met_accommodation') {
       if (!fd.period) fail('Reporting month is required.');
       if (!fd.entries.some(e => e.date && e.location && parseFloat(e.amount) > 0)) fail('Add at least one complete accommodation entry.');
@@ -987,11 +1131,12 @@
       case 'bsc_expense':
       case 'met_outstation': renderExpensePreview(root, fd, F === 'met_outstation'); break;
       case 'met_cab': renderCabPreview(root, fd); break;
+      case 'met_misc': renderMiscPreview(root, fd); break;
       case 'met_accommodation': renderAccommodationPreview(root, fd); break;
     }
 
-    // Grand total (skip for cab request)
-    if (F !== 'met_cab') {
+    // Grand total (all Metfraa forms are now reimbursements with a total)
+    {
       root.appendChild(el('div', { class: 'grand-total' },
         el('div', { class: 'lbl' }, 'Total Reimbursement Claim'),
         el('div', { class: 'amt' }, el('span', { class: 'cur' }, '₹'), fmt(total))
@@ -1103,26 +1248,50 @@
   }
 
   function renderCabPreview(root, fd) {
+    const rides = fd.rides.filter(r => parseFloat(r.fare) > 0 || r.pickup || r.drop);
     const section = el('div', { class: 'trip-section' });
     section.appendChild(el('div', { class: 'trip-banner' },
-      el('div', { class: 'l' }, el('strong', {}, 'PRE-APPROVAL'), 'Cab Request — manager approval required'),
-      el('div', { class: 'r' }, `${fd.rides.length} ride${fd.rides.length === 1 ? '' : 's'}`)
+      el('div', { class: 'l' }, el('strong', {}, 'CAB REIMBURSEMENT'), 'Trips of 80 km or more'),
+      el('div', { class: 'r' }, `${rides.length} trip${rides.length === 1 ? '' : 's'}`)
     ));
 
     const table = el('table');
     table.appendChild(el('thead', {}, el('tr', {},
-      ...['Date / Time','Pickup','Drop','Pax','Purpose','Notes'].map(h => el('th', {}, h))
+      ...['Date','Pickup','Drop','Distance','Fare (₹)','Purpose'].map(h => el('th', {}, h))
     )));
     const tbody = el('tbody');
-    for (const r of fd.rides) {
-      if (!r.pickup && !r.drop) continue;
+    for (const r of rides) {
       tbody.appendChild(el('tr', {},
-        el('td', {}, `${formatDate(r.date)}${r.time ? ' · ' + r.time : ''}`),
+        el('td', {}, formatDate(r.date)),
         el('td', {}, r.pickup || '—'),
         el('td', {}, r.drop || '—'),
-        el('td', { class: 'num' }, r.passengers || '1'),
-        el('td', {}, r.purpose || '—'),
-        el('td', {}, r.notes || '—')
+        el('td', { class: 'num' }, `${r.km || '—'} km`),
+        el('td', { class: 'num' }, fmt(parseFloat(r.fare) || 0)),
+        el('td', {}, r.purpose || '—')
+      ));
+    }
+    table.appendChild(tbody);
+    section.appendChild(table);
+    root.appendChild(section);
+  }
+
+  function renderMiscPreview(root, fd) {
+    const items = fd.items.filter(it => parseFloat(it.amount) > 0 || it.purpose);
+    const section = el('div', { class: 'trip-section' });
+    section.appendChild(el('div', { class: 'trip-banner' },
+      el('div', { class: 'l' }, el('strong', {}, 'MISCELLANEOUS'), 'Other work expenses'),
+      el('div', { class: 'r' }, `${items.length} item${items.length === 1 ? '' : 's'}`)
+    ));
+    const table = el('table');
+    table.appendChild(el('thead', {}, el('tr', {},
+      ...['Date','Purpose','Amount (₹)'].map(h => el('th', {}, h))
+    )));
+    const tbody = el('tbody');
+    for (const it of items) {
+      tbody.appendChild(el('tr', {},
+        el('td', {}, formatDate(it.date)),
+        el('td', {}, it.purpose || '—'),
+        el('td', { class: 'num' }, fmt(parseFloat(it.amount) || 0))
       ));
     }
     table.appendChild(tbody);
@@ -1378,8 +1547,9 @@
   }
 
   const FORM_LABEL = {
-    met_local: 'Local Travel', met_cab: 'Cab Request',
+    met_local: 'Local Travel', met_cab: 'Cab Reimbursement',
     met_accommodation: 'Accommodation', met_outstation: 'Outstation',
+    met_misc: 'Miscellaneous',
     bsc_conveyance: 'Local Conveyance', bsc_expense: 'Travel Expense',
   };
   function fmtDateShort(s) {
@@ -1573,6 +1743,7 @@
 
   $('#backToForm').addEventListener('click', () => route('form'));
   $('#submitFromPreview').addEventListener('click', () => submitForm());
+  $('#backBtn') && $('#backBtn').addEventListener('click', goBack);
 
   // Admin panel events
   $('#addEmpBtn') && $('#addEmpBtn').addEventListener('click', () => openEmployeeModal(null));

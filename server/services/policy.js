@@ -97,13 +97,14 @@ const POLICY = {
           'Travel under 5 km when reporting directly to a different location is NOT eligible.',
         ],
       },
-      // 2) Cab Request (pre-approval)
+      // 2) Cab Reimbursement
       cab: {
-        title: 'Cab Request',
-        description: 'Pre-approval request for company-arranged cab / taxi.',
+        title: 'Cab Reimbursement',
+        description: 'Reimbursement for cab / taxi fare on eligible long-distance local travel.',
+        min_km: 80,
         rules: [
-          'Submit at least 24 hours in advance whenever possible.',
-          'Manager approval is required before booking.',
+          'Applicable only for journeys of 80 km or more. Shorter trips are not eligible.',
+          'Attach the cab/taxi bill or receipt for the fare claimed.',
           'For emergencies / late-night travel, document the reason clearly.',
         ],
       },

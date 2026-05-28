@@ -23,7 +23,7 @@ function generateRef(company, formType) {
   const typeMap = {
     bsc_conveyance: 'CV', bsc_expense: 'EX',
     met_local: 'LT', met_cab: 'CB',
-    met_accommodation: 'AC', met_outstation: 'OT',
+    met_accommodation: 'AC', met_outstation: 'OT', met_misc: 'MS',
   };
   const t = typeMap[formType] || 'XX';
   const d = new Date();
@@ -129,11 +129,12 @@ router.get('/', requireAuth, (req, res) => {
 });
 
 // Build a report PDF on-demand (used for draft preview of pending items)
-const { buildReportPdf } = require('../services/report-builder');
+const { buildReportPdf, buildMergedPreview } = require('../services/report-builder');
 
-// GET /api/submissions/:id/pdf — stream the report
-//   approved → the stored merged PDF (report + bills)
-//   pending  → a freshly-generated draft (report only, bills embedded as previews)
+// GET /api/submissions/:id/pdf — stream the report (report + bills merged)
+//   approved → the stored merged PDF
+//   otherwise → a freshly-merged preview (report + all uploaded bills)
+//   ?download=1 forces a download; default opens inline in the browser
 router.get('/:id/pdf', requireAuth, async (req, res) => {
   const sub = stmts.getSubmission.get(parseInt(req.params.id, 10));
   if (!sub) return res.status(404).json({ error: 'Not found' });
@@ -143,14 +144,17 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
-    // Approved & merged report on disk → serve it
+    let filePath;
     if (sub.pdf_path && fs.existsSync(sub.pdf_path)) {
-      return res.download(sub.pdf_path, `${sub.reference}.pdf`);
+      filePath = sub.pdf_path;                 // approved: stored merged report
+    } else {
+      filePath = await buildMergedPreview(sub); // live: report + bills merged
     }
-    // Otherwise build a draft (report only)
-    const draftPath = await buildReportPdf(sub);
-    const label = sub.status === 'approved' ? '' : '_DRAFT';
-    return res.download(draftPath, `${sub.reference}${label}.pdf`);
+    const label = sub.status === 'approved' ? '' : '_PREVIEW';
+    const disposition = req.query.download ? 'attachment' : 'inline';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${sub.reference}${label}.pdf"`);
+    fs.createReadStream(filePath).pipe(res);
   } catch (err) {
     console.error('[pdf]', err);
     return res.status(500).json({ error: 'Could not produce PDF' });
