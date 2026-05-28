@@ -161,6 +161,28 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/submissions/:id/attachment/:attId — serve a raw bill file (owner/admin)
+router.get('/:id/attachment/:attId', requireAuth, (req, res) => {
+  const sub = stmts.getSubmission.get(parseInt(req.params.id, 10));
+  if (!sub) return res.status(404).json({ error: 'Not found' });
+  const admins = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim().toLowerCase());
+  const isAdmin = admins.includes(req.user.email.toLowerCase());
+  if (sub.employee_id !== req.user.id && !isAdmin) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const attId = parseInt(req.params.attId, 10);
+  const att = stmts.listAttachments.all(sub.id).find(a => a.id === attId);
+  if (!att) return res.status(404).json({ error: 'Attachment not found' });
+  const abs = path.isAbsolute(att.stored_path)
+    ? att.stored_path
+    : path.join(__dirname, '..', '..', att.stored_path);
+  if (!fs.existsSync(abs)) return res.status(404).json({ error: 'File missing on disk' });
+  const disposition = req.query.download ? 'attachment' : 'inline';
+  res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${disposition}; filename="${att.filename.replace(/"/g, '')}"`);
+  fs.createReadStream(abs).pipe(res);
+});
+
 // GET /api/submissions/:id — fetch one submission's details (owner / admin)
 router.get('/:id', requireAuth, (req, res) => {
   const sub = stmts.getSubmission.get(parseInt(req.params.id, 10));

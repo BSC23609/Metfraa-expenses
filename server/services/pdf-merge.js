@@ -50,8 +50,8 @@ async function mergeReportWithBills(reportPdfPath, attachments, outPath) {
     const mime = (att.mime_type || '').toLowerCase();
 
     if (mime === 'application/pdf') {
-      // Append the PDF's pages, prefixed by a caption page
-      addCaptionPage(merged, helv, helvBold, att, billNo, total);
+      // Append the PDF's pages directly (no separator/caption page — the
+      // original invoice follows the report immediately).
       try {
         const src = await PDFDocument.load(fs.readFileSync(abs), { ignoreEncryption: true });
         const pages = await merged.copyPages(src, src.getPageIndices());

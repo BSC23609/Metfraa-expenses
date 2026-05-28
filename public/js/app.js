@@ -255,12 +255,22 @@
       el('strong', {}, money(s.total_amount))
     ));
 
-    // Attachments
+    // Attachments — clickable to open the actual bill inline
     if (s.attachments && s.attachments.length) {
       const att = el('div', { class: 'vd-attachments' },
-        el('div', { class: 'vd-label' }, `${s.attachments.length} Bill${s.attachments.length === 1 ? '' : 's'} Attached`)
+        el('div', { class: 'vd-label' }, `${s.attachments.length} Bill${s.attachments.length === 1 ? '' : 's'} Attached — click to view`)
       );
-      s.attachments.forEach(a => att.appendChild(el('span', { class: 'vd-chip' }, a.filename)));
+      s.attachments.forEach(a => {
+        att.appendChild(el('a', {
+          class: 'vd-chip vd-chip-link',
+          href: `/api/submissions/${s.id}/attachment/${a.id}`,
+          target: '_blank', rel: 'noopener',
+          title: 'Open bill in a new tab',
+        },
+          el('span', { html: ICONS.receipt || '' , class: 'vd-chip-ico' }),
+          a.filename
+        ));
+      });
       wrap.appendChild(att);
     }
     return wrap;

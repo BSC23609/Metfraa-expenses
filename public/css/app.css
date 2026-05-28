@@ -1817,3 +1817,15 @@ body::after {
 @media (max-width: 600px) {
   .vd-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* Clickable bill chips in the viewer */
+.vd-chip-link {
+  text-decoration: none; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: all 0.15s ease;
+}
+.vd-chip-link:hover {
+  background: var(--bsg-blue); color: #fff; border-color: var(--bsg-blue);
+}
+.vd-chip-ico { display: inline-flex; width: 13px; height: 13px; }
+.vd-chip-ico svg { width: 13px; height: 13px; }

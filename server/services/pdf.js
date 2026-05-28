@@ -292,7 +292,14 @@ function table(doc, headers, rows, colWidths, opts = {}) {
   const left = 50;
   const right = doc.page.width - 50;
   const totalW = right - left;
-  const widths = colWidths || headers.map(() => totalW / headers.length);
+  let widths = colWidths || headers.map(() => totalW / headers.length);
+  // Normalise: scale the requested widths so they always sum to exactly the
+  // available table width. This guarantees the last column (often the amount)
+  // never spills outside the right edge, regardless of the numbers passed in.
+  const sum = widths.reduce((a, b) => a + b, 0);
+  if (sum > 0 && Math.abs(sum - totalW) > 0.5) {
+    widths = widths.map(w => w * totalW / sum);
+  }
   const ROW_PAD = 6;
 
   // ensure room for at least one row
