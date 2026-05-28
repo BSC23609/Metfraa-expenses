@@ -1,0 +1,91 @@
+# ====================================================================
+#  RENDER BLUEPRINT · Metfraa Expense Portal
+# ====================================================================
+#  This file lets Render provision the whole service automatically.
+#  In Render: New → Blueprint → connect this repo → it reads render.yaml.
+#
+#  IMPORTANT: After the first deploy, set the secret env vars (marked
+#  sync:false below) in the Render dashboard — they are NOT stored here
+#  so secrets never get committed to git.
+# ====================================================================
+
+services:
+  - type: web
+    name: metfraa-expense-portal
+    runtime: node
+    plan: starter            # ~$7/mo; needed for a persistent disk + always-on
+    region: singapore        # closest Render region to India; or 'oregon'/'frankfurt'
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+
+    # Persistent disk: keeps the SQLite DB + uploaded bills + generated
+    # reports across deploys and restarts. WITHOUT THIS, every deploy
+    # wipes your data. Mounted so data/ and uploads/ live on it.
+    disk:
+      name: portal-data
+      mountPath: /var/data
+      sizeGB: 5
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      # Tell the app to store its DB + uploads on the persistent disk.
+      - key: DATA_DIR
+        value: /var/data/data
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
+
+      # Your public URL (set this to the custom domain once attached).
+      - key: APP_URL
+        value: https://expenses.metfraa.com
+
+      # ---- secrets: set these in the Render dashboard, not here ----
+      - key: SESSION_SECRET
+        generateValue: true        # Render generates a strong random value
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: MS_TENANT_ID
+        sync: false
+      - key: MS_CLIENT_ID
+        sync: false
+      - key: MS_CLIENT_SECRET
+        sync: false
+
+      # ---- non-secret config ----
+      - key: ONEDRIVE_TARGET_USER
+        value: info@metfraa.com
+      - key: ONEDRIVE_ROOT_FOLDER
+        value: Reimbursements and Conveyance
+      - key: ONEDRIVE_RETRY_MINUTES
+        value: "15"
+      - key: ADMIN_EMAILS
+        value: admin@metfraa.com,hr@metfraa.com,info@metfraa.com,arasu@metfraa.com
+      - key: ALLOWED_HD_DOMAINS
+        value: metfraa.com
+      - key: METFRAA_HR_EMAIL
+        value: info@metfraa.com
+      - key: UPLOAD_MAX_MB
+        value: "10"
+      - key: UPLOAD_TOTAL_MAX_MB
+        value: "50"
+
+      # ---- SMTP (only needed once you add email notifications) ----
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        value: info@metfraa.com
+      - key: SMTP_FROM_NAME
+        value: Metfraa Expense Portal

@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Expense Portal · The Bharat Steel Group</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+
+<!-- ============== TOP BAR ============== -->
+<header class="topbar" id="topbar">
+  <div class="topbar-left">
+    <img src="/assets/group-logo.png" alt="The Bharat Steel Group" class="logo" data-nav="landing" />
+    <div class="topbar-divider" id="tbDivider" style="display:none;"></div>
+    <img src="" alt="" class="logo company" id="tbCompanyLogo" style="display:none;" />
+  </div>
+  <div class="topbar-right">
+    <span class="topbar-tag" id="tbTag">EXPENSE PORTAL</span>
+    <div class="user-chip" id="userChip">
+      <span class="name" id="userName">…</span>
+      <span class="avatar" id="userAvatar">·</span>
+      <div class="user-menu" id="userMenu">
+        <div class="info">
+          <div class="full-name" id="umName">…</div>
+          <div class="email" id="umEmail">…</div>
+          <span class="level" id="umLevel">…</span>
+        </div>
+        <form method="POST" action="/auth/logout">
+          <button type="submit">Sign Out</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="app" id="app">
+
+<!-- ============== LANDING ============== -->
+<section class="page" id="page-landing">
+  <div class="landing-wrap">
+    <div class="landing-hero">
+      <div class="group-logo-wrap">
+        <img src="/assets/group-logo.png" alt="The Bharat Steel Group" />
+      </div>
+      <div class="tagline">EXPENSE &amp; CONVEYANCE PORTAL</div>
+    </div>
+    <div class="company-grid" id="companyGrid">
+      <!-- rendered by JS, locked to user's company -->
+    </div>
+  </div>
+</section>
+
+<!-- ============== COMPANY HUB ============== -->
+<section class="page" id="page-hub">
+  <div class="container">
+    <div class="hub-header">
+      <div>
+        <div class="breadcrumb"><a data-nav="landing">Home</a></div>
+        <h2 id="hubTitle">…</h2>
+      </div>
+    </div>
+    <div class="option-grid" id="optionGrid">
+      <!-- form option cards rendered by JS -->
+    </div>
+  </div>
+</section>
+
+<!-- ============== ELIGIBILITY (POLICY VIEWER) ============== -->
+<section class="page" id="page-eligibility">
+  <div class="container">
+    <div class="form-header">
+      <div>
+        <div class="breadcrumb">
+          <a data-nav="landing">Home</a>
+          <span class="sep">·</span>
+          <a data-nav="hub">Forms</a>
+        </div>
+        <h2>Check Eligibility</h2>
+      </div>
+      <button class="back-btn" data-nav="hub">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+        Back
+      </button>
+    </div>
+    <div id="policyContent"><!-- rendered by policy-renderer.js --></div>
+  </div>
+</section>
+
+<!-- ============== FORM PAGE (used for all 6 forms) ============== -->
+<section class="page" id="page-form">
+  <div class="container">
+    <div class="form-header">
+      <div>
+        <div class="breadcrumb">
+          <a data-nav="landing">Home</a>
+          <span class="sep">·</span>
+          <a data-nav="hub">Forms</a>
+        </div>
+        <h2 id="formTitle">…</h2>
+      </div>
+      <button class="back-btn" data-nav="hub">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+        Back
+      </button>
+    </div>
+
+    <div id="entitlementBanner"></div>
+
+    <!-- Form-specific body, rendered by app.js -->
+    <div id="formBody"></div>
+
+    <!-- Uploads (rendered conditionally) -->
+    <div id="uploadSection" class="card" style="display:none;">
+      <div class="card-title">Bills &amp; Supporting Documents</div>
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" multiple accept="image/*,.pdf" />
+        <span class="icon">📎</span>
+        <div class="text">Drop bills here or click to browse</div>
+        <div class="hint">JPG, PNG, WEBP, HEIC, or PDF · up to 10 MB each · originals embedded in the final report</div>
+      </div>
+      <div class="upload-list" id="uploadList"></div>
+    </div>
+
+    <!-- Live summary -->
+    <div class="summary-bar" id="summaryBar">
+      <div>
+        <div class="lbl">Total Claim</div>
+        <div class="grand"><span class="cur">₹</span><span id="grandTotal">0.00</span></div>
+      </div>
+      <div class="count">
+        ENTRIES
+        <span id="entryCount">0</span>
+      </div>
+    </div>
+
+    <div class="action-bar">
+      <button class="btn btn-secondary" data-nav="hub">Cancel</button>
+      <div style="display:flex; gap:12px;">
+        <button class="btn btn-primary" id="previewBtn">Preview Report</button>
+        <button class="btn btn-submit" id="submitBtn">Submit &amp; Send to HR</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== PREVIEW ============== -->
+<section class="page" id="page-preview">
+  <div class="container">
+    <div class="report-toolbar">
+      <div>
+        <div class="breadcrumb">PREVIEW</div>
+        <h2 style="font-family:Oswald;font-size:24px;text-transform:uppercase;color:var(--bsg-ink);">Final Report Preview</h2>
+      </div>
+      <div style="display:flex; gap:10px;">
+        <button class="btn btn-secondary" id="backToForm">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+          Edit
+        </button>
+        <button class="btn btn-submit" id="submitFromPreview">Confirm &amp; Submit</button>
+      </div>
+    </div>
+    <div class="report" id="reportRender"><!-- rendered by JS --></div>
+  </div>
+</section>
+
+<!-- ============== SUCCESS ============== -->
+<section class="page" id="page-success">
+  <div class="container">
+    <div class="success-wrap">
+      <div class="success-icon">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+          <path d="M20 6L9 17l-5-5"/>
+        </svg>
+      </div>
+      <h1>Submitted</h1>
+      <p>Your report has been generated and emailed to HR. A copy is also saved in your submission history.</p>
+      <div class="recipient" id="successRecipients">…</div>
+      <div class="ref-num">Reference: <strong id="successRef">—</strong></div>
+      <div class="btn-group">
+        <a class="btn btn-secondary" id="downloadPdfBtn" download>Download PDF</a>
+        <button class="btn btn-primary" data-nav="landing">Back to Home</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== ADMIN PANEL ============== -->
+<section class="page" id="page-admin">
+  <div class="container">
+    <div class="form-header">
+      <div>
+        <div class="breadcrumb"><a data-nav="hub">Home</a></div>
+        <h2>Admin Panel</h2>
+      </div>
+    </div>
+
+    <div class="admin-tabs">
+      <button class="admin-tab active" data-tab="pending">
+        Pending Approvals <span class="tab-badge" id="pendingBadge">0</span>
+      </button>
+      <button class="admin-tab" data-tab="submissions">All Submissions</button>
+      <button class="admin-tab" data-tab="employees">Employees</button>
+    </div>
+
+    <!-- TAB: Pending Approvals -->
+    <div class="admin-tabpane active" id="tab-pending">
+      <div class="admin-toolbar">
+        <input type="text" id="pendSearch" class="admin-search" placeholder="Search pending by name, reference, form…" />
+        <span class="admin-count" id="pendCount"></span>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="overflow-x:auto;">
+          <table class="admin-table" id="pendTable">
+            <thead>
+              <tr>
+                <th>Reference</th><th>Employee</th><th>Form</th><th>Period</th>
+                <th style="text-align:right;">Amount</th><th>Submitted</th>
+                <th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="pendTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: All Submissions -->
+    <div class="admin-tabpane" id="tab-submissions">
+      <div class="admin-toolbar">
+        <input type="text" id="subSearch" class="admin-search" placeholder="Search by name, reference, status…" />
+        <select id="subStatusFilter" class="admin-search" style="flex:0 0 180px;">
+          <option value="">All statuses</option>
+          <option value="pending">Pending</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
+        </select>
+        <span class="admin-count" id="subCount"></span>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="overflow-x:auto;">
+          <table class="admin-table" id="subTable">
+            <thead>
+              <tr>
+                <th>Reference</th><th>Employee</th><th>Form</th><th>Period</th>
+                <th style="text-align:right;">Amount</th><th>Status</th><th>Submitted</th>
+                <th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="subTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: Employees -->
+    <div class="admin-tabpane" id="tab-employees">
+      <div class="admin-toolbar">
+        <input type="text" id="empSearch" class="admin-search" placeholder="Search by name, email, designation…" />
+        <label class="admin-inactive-toggle">
+          <input type="checkbox" id="showInactive" /> Show inactive
+        </label>
+        <span class="admin-count" id="empCount"></span>
+        <button class="btn btn-submit" id="addEmpBtn" style="margin-left:auto;">+ Add Employee</button>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="overflow-x:auto;">
+          <table class="admin-table" id="empTable">
+            <thead>
+              <tr>
+                <th>Name</th><th>Email</th><th>Designation</th>
+                <th>Level</th><th>Code</th><th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="empTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div><!-- /app -->
+
+<!-- ============== EMPLOYEE ADD/EDIT MODAL ============== -->
+<div class="modal-backdrop" id="empModalBackdrop">
+  <div class="modal" id="empModal" style="max-width:560px;">
+    <h3 id="empModalTitle">Add Employee</h3>
+    <div class="field-grid" style="margin-top:8px;">
+      <div class="field span-2">
+        <label>Full Name <span class="req">*</span></label>
+        <input type="text" id="empName" placeholder="e.g. Ramesh Kumar" />
+      </div>
+      <div class="field span-2">
+        <label>Email (Google login) <span class="req">*</span></label>
+        <input type="email" id="empEmail" placeholder="name@metfraa.com" />
+      </div>
+      <div class="field">
+        <label>Level <span class="req">*</span></label>
+        <select id="empLevel">
+          <option value="JUNIOR">Junior (L1)</option>
+          <option value="SENIOR">Senior (L2)</option>
+          <option value="MANAGER">Manager (L3)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Employee Code</label>
+        <input type="text" id="empCode" placeholder="MET-031" />
+      </div>
+      <div class="field span-2">
+        <label>Designation</label>
+        <input type="text" id="empDesignation" placeholder="e.g. Site Engineer" />
+      </div>
+      <div class="field span-2">
+        <label>Department</label>
+        <input type="text" id="empDepartment" placeholder="e.g. Projects" />
+      </div>
+      <div class="field span-2">
+        <label>Reporting Manager Email</label>
+        <input type="email" id="empManager" placeholder="admin@metfraa.com" />
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-ghost" id="empModalCancel">Cancel</button>
+      <button class="btn btn-submit" id="empModalSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== TOAST / MODAL / OVERLAY ============== -->
+<div class="toast" id="toast"></div>
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modal">
+    <h3 id="modalTitle">Confirm</h3>
+    <p id="modalBody">…</p>
+    <div class="modal-recipient" id="modalRecipient" style="display:none;"></div>
+    <div class="actions">
+      <button class="btn btn-ghost" id="modalCancel">Cancel</button>
+      <button class="btn btn-submit" id="modalConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <div class="text" id="loadingText">Working…</div>
+</div>
+
+<script src="/js/policy-renderer.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

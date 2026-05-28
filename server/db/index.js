@@ -1,0 +1,262 @@
+// ====================================================================
+//  DATABASE · SQLite via better-sqlite3
+// ====================================================================
+//  Single source of truth for the schema. Idempotent — running it
+//  multiple times is safe; existing tables/columns are preserved.
+// ====================================================================
+
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
+const { DB_PATH } = require('../config/paths');
+
+const db = new Database(DB_PATH);
+
+// Better SQLite settings for production
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+db.pragma('synchronous = NORMAL');
+
+// ====================================================================
+//  SCHEMA
+// ====================================================================
+
+db.exec(`
+  -- Employees: master record. Loaded by HR/admin. Levels drive policy
+  -- entitlements (rates, daily caps).
+  -- NOTE: email is intentionally NOT unique. Several Metfraa staff
+  -- genuinely share a mailbox (e.g. accounts@, admin@). SSO login
+  -- resolves to the first active employee row matching that email.
+  CREATE TABLE IF NOT EXISTS employees (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    email         TEXT NOT NULL COLLATE NOCASE,
+    name          TEXT NOT NULL,
+    employee_code TEXT,
+    company       TEXT NOT NULL,                    -- 'bsc' or 'metfraa'
+    level         TEXT NOT NULL,                    -- L1 / L2 / L3 (Metfraa) or CAT1/CAT2 (BSC)
+    designation   TEXT,
+    department    TEXT,
+    manager_email TEXT,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_employees_company ON employees(company);
+  CREATE INDEX IF NOT EXISTS idx_employees_email   ON employees(email);
+
+  -- Submissions: every form an employee fills. Header row.
+  CREATE TABLE IF NOT EXISTS submissions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    reference       TEXT UNIQUE NOT NULL,           -- e.g. MET-OT-260528-A4F7
+    employee_id     INTEGER NOT NULL REFERENCES employees(id),
+    company         TEXT NOT NULL,
+    form_type       TEXT NOT NULL,                  -- 'met_local' | 'met_cab' | 'met_accommodation' | 'met_outstation' | (bsc_* retained)
+    period          TEXT,                           -- YYYY-MM (most forms) or specific dates
+    payload_json    TEXT NOT NULL,                  -- full form data (denormalised, source of truth)
+    total_amount    REAL NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'pending',    -- pending | approved | rejected
+    pdf_path        TEXT,                           -- final merged report path (set ON APPROVAL)
+    email_sent_at   TEXT,
+    email_error     TEXT,
+    -- approval workflow
+    reviewed_by     TEXT,                           -- admin email who approved/rejected
+    reviewed_at     TEXT,
+    review_note     TEXT,                           -- optional rejection reason / note
+    -- OneDrive sync tracking
+    od_log_synced   INTEGER NOT NULL DEFAULT 0,     -- excel log row written?
+    od_uploads_synced INTEGER NOT NULL DEFAULT 0,   -- raw bills pushed?
+    od_report_synced  INTEGER NOT NULL DEFAULT 0,   -- final report pushed (on approval)?
+    od_error        TEXT,                           -- last OneDrive sync error, if any
+    submitted_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_subs_employee ON submissions(employee_id);
+  CREATE INDEX IF NOT EXISTS idx_subs_company  ON submissions(company);
+  CREATE INDEX IF NOT EXISTS idx_subs_period   ON submissions(period);
+  CREATE INDEX IF NOT EXISTS idx_subs_status   ON submissions(status);
+
+  -- Bill attachments: photos / PDFs uploaded with a submission.
+  CREATE TABLE IF NOT EXISTS attachments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+    filename      TEXT NOT NULL,                    -- original filename
+    stored_path   TEXT NOT NULL,                    -- relative path on disk
+    mime_type     TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL,
+    category      TEXT,                             -- accommodation | food | conveyance | other | general
+    label         TEXT,                             -- user-supplied caption
+    uploaded_at   TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_att_submission ON attachments(submission_id);
+
+  -- Pending uploads: bills uploaded BEFORE the form is submitted (drag-drop UX).
+  -- These get linked to a submission on submit, or garbage-collected if stale.
+  CREATE TABLE IF NOT EXISTS pending_uploads (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    upload_token  TEXT NOT NULL,                    -- groups uploads for a single in-progress form
+    employee_id   INTEGER NOT NULL REFERENCES employees(id),
+    filename      TEXT NOT NULL,
+    stored_path   TEXT NOT NULL,
+    mime_type     TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_pending_token ON pending_uploads(upload_token);
+
+  -- Audit log: every meaningful action
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_email   TEXT,
+    action        TEXT NOT NULL,                    -- LOGIN, SUBMIT, APPROVE, REJECT, etc.
+    target_type   TEXT,                             -- submission, employee, etc.
+    target_id     INTEGER,
+    meta_json     TEXT,
+    ip_address    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_audit_actor  ON audit_log(actor_email);
+  CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+`);
+
+// --------------------------------------------------------------------
+//  Lightweight migration: add columns introduced after first release
+//  (safe to run every boot — only adds what's missing).
+// --------------------------------------------------------------------
+(function migrate() {
+  const cols = db.prepare(`PRAGMA table_info(submissions)`).all().map(c => c.name);
+  const add = (name, ddl) => { if (!cols.includes(name)) db.exec(`ALTER TABLE submissions ADD COLUMN ${ddl}`); };
+  add('reviewed_by',       `reviewed_by TEXT`);
+  add('reviewed_at',       `reviewed_at TEXT`);
+  add('review_note',       `review_note TEXT`);
+  add('od_log_synced',     `od_log_synced INTEGER NOT NULL DEFAULT 0`);
+  add('od_uploads_synced', `od_uploads_synced INTEGER NOT NULL DEFAULT 0`);
+  add('od_report_synced',  `od_report_synced INTEGER NOT NULL DEFAULT 0`);
+  add('od_error',          `od_error TEXT`);
+  // Normalise any legacy 'submitted' status to 'pending'
+  db.exec(`UPDATE submissions SET status='pending' WHERE status='submitted'`);
+})();
+
+// ====================================================================
+//  HELPER STATEMENTS (prepared once, reused)
+// ====================================================================
+
+const stmts = {
+  // SSO resolves to the most recently-updated active row for an email.
+  // (Shared mailboxes map to one portal identity by design.)
+  findEmployeeByEmail: db.prepare(`SELECT * FROM employees WHERE email = ? COLLATE NOCASE AND is_active = 1 ORDER BY updated_at DESC, id ASC LIMIT 1`),
+  findAllByEmail: db.prepare(`SELECT * FROM employees WHERE email = ? COLLATE NOCASE AND is_active = 1 ORDER BY id`),
+  getEmployeeById: db.prepare(`SELECT * FROM employees WHERE id = ?`),
+  insertEmployee: db.prepare(`
+    INSERT INTO employees (email, name, employee_code, company, level, designation, department, manager_email)
+    VALUES (@email, @name, @employee_code, @company, @level, @designation, @department, @manager_email)
+  `),
+  updateEmployee: db.prepare(`
+    UPDATE employees SET
+      email = @email, name = @name, employee_code = @employee_code,
+      company = @company, level = @level, designation = @designation,
+      department = @department, manager_email = @manager_email,
+      is_active = @is_active, updated_at = datetime('now')
+    WHERE id = @id
+  `),
+  deactivateEmployee: db.prepare(`UPDATE employees SET is_active = 0, updated_at = datetime('now') WHERE id = ?`),
+  listEmployees: db.prepare(`SELECT * FROM employees WHERE is_active = 1 ORDER BY company, name`),
+  listEmployeesAll: db.prepare(`SELECT * FROM employees ORDER BY is_active DESC, company, name`),
+  countEmployeeSubmissions: db.prepare(`SELECT COUNT(*) AS n FROM submissions WHERE employee_id = ?`),
+
+  createSubmission: db.prepare(`
+    INSERT INTO submissions (reference, employee_id, company, form_type, period, payload_json, total_amount, pdf_path)
+    VALUES (@reference, @employee_id, @company, @form_type, @period, @payload_json, @total_amount, @pdf_path)
+  `),
+  updateSubmissionPdf: db.prepare(`UPDATE submissions SET pdf_path = ? WHERE id = ?`),
+  markEmailSent: db.prepare(`UPDATE submissions SET email_sent_at = datetime('now'), email_error = NULL WHERE id = ?`),
+  markEmailFailed: db.prepare(`UPDATE submissions SET email_error = ? WHERE id = ?`),
+
+  // approval workflow
+  approveSubmission: db.prepare(`
+    UPDATE submissions SET status='approved', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note WHERE id=@id
+  `),
+  rejectSubmission: db.prepare(`
+    UPDATE submissions SET status='rejected', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note WHERE id=@id
+  `),
+  // OneDrive sync flags
+  markLogSynced:     db.prepare(`UPDATE submissions SET od_log_synced=1, od_error=NULL WHERE id=?`),
+  markUploadsSynced: db.prepare(`UPDATE submissions SET od_uploads_synced=1 WHERE id=?`),
+  markReportSynced:  db.prepare(`UPDATE submissions SET od_report_synced=1 WHERE id=?`),
+  markOdError:       db.prepare(`UPDATE submissions SET od_error=? WHERE id=?`),
+
+  getSubmission: db.prepare(`
+    SELECT s.*, e.name AS employee_name, e.email AS employee_email, e.employee_code, e.designation, e.department, e.level
+    FROM submissions s
+    JOIN employees e ON e.id = s.employee_id
+    WHERE s.id = ?
+  `),
+  listSubmissionsForEmployee: db.prepare(`
+    SELECT id, reference, company, form_type, period, total_amount, status, submitted_at, reviewed_at
+    FROM submissions
+    WHERE employee_id = ?
+    ORDER BY submitted_at DESC
+    LIMIT 100
+  `),
+  listAllSubmissions: db.prepare(`
+    SELECT s.id, s.reference, s.company, s.form_type, s.period, s.total_amount, s.status,
+           s.submitted_at, s.reviewed_at, s.reviewed_by, s.pdf_path,
+           s.od_report_synced,
+           e.name AS employee_name, e.email AS employee_email, e.level
+    FROM submissions s
+    JOIN employees e ON e.id = s.employee_id
+    ORDER BY s.submitted_at DESC
+    LIMIT 500
+  `),
+  listSubmissionsByStatus: db.prepare(`
+    SELECT s.id, s.reference, s.company, s.form_type, s.period, s.total_amount, s.status,
+           s.submitted_at, s.reviewed_at, s.reviewed_by, s.pdf_path,
+           e.name AS employee_name, e.email AS employee_email, e.level
+    FROM submissions s
+    JOIN employees e ON e.id = s.employee_id
+    WHERE s.status = ?
+    ORDER BY s.submitted_at DESC
+    LIMIT 500
+  `),
+
+  insertAttachment: db.prepare(`
+    INSERT INTO attachments (submission_id, filename, stored_path, mime_type, size_bytes, category, label)
+    VALUES (@submission_id, @filename, @stored_path, @mime_type, @size_bytes, @category, @label)
+  `),
+  listAttachments: db.prepare(`SELECT * FROM attachments WHERE submission_id = ? ORDER BY id`),
+
+  insertPendingUpload: db.prepare(`
+    INSERT INTO pending_uploads (upload_token, employee_id, filename, stored_path, mime_type, size_bytes)
+    VALUES (@upload_token, @employee_id, @filename, @stored_path, @mime_type, @size_bytes)
+  `),
+  listPendingByToken: db.prepare(`SELECT * FROM pending_uploads WHERE upload_token = ? AND employee_id = ?`),
+  deletePending: db.prepare(`DELETE FROM pending_uploads WHERE id = ? AND employee_id = ?`),
+  deletePendingByToken: db.prepare(`DELETE FROM pending_uploads WHERE upload_token = ?`),
+  cleanupOldPending: db.prepare(`DELETE FROM pending_uploads WHERE created_at < datetime('now', '-7 days')`),
+
+  insertAudit: db.prepare(`
+    INSERT INTO audit_log (actor_email, action, target_type, target_id, meta_json, ip_address)
+    VALUES (@actor_email, @action, @target_type, @target_id, @meta_json, @ip_address)
+  `),
+};
+
+// Wrap as a transactional helper for submission creation
+const createSubmissionTx = db.transaction((submission, attachments) => {
+  const result = stmts.createSubmission.run(submission);
+  const submissionId = result.lastInsertRowid;
+  for (const att of attachments) {
+    stmts.insertAttachment.run({ ...att, submission_id: submissionId });
+  }
+  return submissionId;
+});
+
+module.exports = {
+  db,
+  stmts,
+  createSubmissionTx,
+};

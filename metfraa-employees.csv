@@ -1,0 +1,32 @@
+email,name,employee_code,company,level,designation,department,manager_email
+admin@metfraa.com,SUDHA.G,MET-001,metfraa,JUNIOR,ADMIN,Administration,admin@metfraa.com
+thanavel@metfraa.com,THANAVEL,MET-002,metfraa,MANAGER,PROJECT MANAGER,Projects,admin@metfraa.com
+vijay@metfraa.com,VIJAY.R,MET-003,metfraa,MANAGER,PROJECT MANAGER,Projects,admin@metfraa.com
+sathya@metfraa.com,SATHIYASEELAN.S,MET-004,metfraa,MANAGER,GENERAL MANAGER - SALES,Sales,admin@metfraa.com
+hr@metfraa.com,BODAPATI SHEELA HEPSIBAH GRACE,MET-005,metfraa,JUNIOR,HR - ASSISTANT,HR,admin@metfraa.com
+nainar@metfraa.com,N.NAINAR,MET-006,metfraa,MANAGER,PROJECT MANAGER,Projects,admin@metfraa.com
+khajasheriff.m@metfraa.com,KHAJA SHERIFF,MET-007,metfraa,MANAGER,GENERAL MANAGER - DESIGN,Design,admin@metfraa.com
+costing@metfraa.com,SALMA,MET-008,metfraa,JUNIOR,COSTING AND ESTIMATION ENGINEER,Estimation,admin@metfraa.com
+purchase@metfraa.com,SURESH KUMAR.R,MET-009,metfraa,MANAGER,MANAGER - PURCHASE,Purchase,admin@metfraa.com
+lrajasekar1984@gmail.com,RAJASEKAR,MET-010,metfraa,SENIOR,SITE SUPERVISOR,Site,admin@metfraa.com
+p.velu92@gmail.com,VELAYUTHAM,MET-011,metfraa,MANAGER,SITE MANAGER,Site,admin@metfraa.com
+qaqc@metfraa.com,SURESH.S,MET-012,metfraa,SENIOR,QUALITY CONTROL ENGINEER,Quality,admin@metfraa.com
+mohan2681@gmail.com,MOHAN KUMAR,MET-013,metfraa,JUNIOR,JUNIOR ENGINEER CIVIL,Civil,admin@metfraa.com
+thiru_rani07@yahoo.co.in,THIRUMALAI,MET-014,metfraa,SENIOR,SAFETY OFFICER,EHS,admin@metfraa.com
+thangaraj@metfraa.com,P. THANGARAJ,MET-015,metfraa,MANAGER,PLANT HEAD OPERATIONS,Operations,admin@metfraa.com
+rajsathosh1@gmail.com,A.SANTHOSHRAJ,MET-016,metfraa,JUNIOR,PRODUCTION ENGINEER,Production,admin@metfraa.com
+gopi@metfraa.com,GOPI.M,MET-017,metfraa,MANAGER,PRODUCTION MANAGER,Production,admin@metfraa.com
+sumana@metfraa.com,SUMANA S,MET-018,metfraa,SENIOR,PROJECT COORDINATOR,Projects,admin@metfraa.com
+nandakumar250788@gmail.com,NANDA KUMAR,MET-019,metfraa,SENIOR,PROJECT ENGINEER CIVIL,Civil,admin@metfraa.com
+renjithrj970@gmail.com,RENJITH S A,MET-020,metfraa,JUNIOR,JUNIOR SAFETY EXECUTIVE,EHS,admin@metfraa.com
+nirmal@metfraa.com,NIRMAL KUMAR,MET-021,metfraa,MANAGER,ASSISTANT GENERAL MANAGER - PROJECTS,Projects,admin@metfraa.com
+sales@metfraa.com,VANISHREE R,MET-022,metfraa,JUNIOR,SALES COORDINATOR,Sales,admin@metfraa.com
+robinjkl84@yahoo.com,ROBIN JAMES,MET-023,metfraa,JUNIOR,SITE ENGINEER,Site,admin@metfraa.com
+lokeshel79@gmail.com,E.LOKESH,MET-024,metfraa,JUNIOR,SITE ENGINEER,Site,admin@metfraa.com
+maintenance@metfraa.com,AJOY KUMAR KHATUA,MET-025,metfraa,SENIOR,ASSISTANT MANAGER - MAINTENANCE,Maintenance,admin@metfraa.com
+stores@metfraa.com,DEENADHAYALAN RAMESH,MET-026,metfraa,JUNIOR,STORES EXECUTIVE,Stores,admin@metfraa.com
+accounts@metfraa.com,SATHYA,MET-027,metfraa,JUNIOR,ACCOUNTS ASSISTANT,Accounts,admin@metfraa.com
+saraneeswari@metfraa.com,C.SARANEESWARI,MET-028,metfraa,SENIOR,SENIOR DESIGN ENGINEER,Design,admin@metfraa.com
+varadharaj@metfraa.com,VARATHARAJ NAVANEETHAN,MET-029,metfraa,SENIOR,ASSISTANT MANAGER - EHS,EHS,admin@metfraa.com
+m.gopi@metfraa.com,GOPI MAHENDIRAN M,MET-030,metfraa,SENIOR,DETAILER,Design,admin@metfraa.com
+mansoor@metfraa.com,MANSOOR,MET-031,metfraa,SENIOR,SENIOR CHECKER,Design,admin@metfraa.com
