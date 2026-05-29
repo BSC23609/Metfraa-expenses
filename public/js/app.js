@@ -548,7 +548,9 @@
       }
       for (const adv of list) {
         const p = adv.payload || {};
+        const isPending  = adv.status === 'pending';
         const isRejected = adv.status === 'settlement_rejected';
+        const canSettle  = !isPending; // only after admin approves the advance
         const card = el('div', { class: 'card advance-list-card' });
         card.appendChild(el('div', { class: 'adv-row-head' },
           el('div', {},
@@ -558,23 +560,28 @@
             )
           ),
           el('div', { class: 'adv-amt' },
-            el('span', { class: 'adv-amt-lbl' }, 'Advance'),
+            el('span', { class: 'adv-amt-lbl' }, isPending ? 'Requested' : 'Advance'),
             el('span', { class: 'adv-amt-val' }, '₹ ' + fmt(adv.total_amount))
           )
         ));
         if (p.purpose) {
           card.appendChild(el('div', { class: 'adv-purpose' }, p.purpose));
         }
+        // Status pill class + label vary by state
+        let pillClass = 'approved';
+        let pillLabel = 'advance approved · awaiting settlement';
+        if (isPending)  { pillClass = 'pending';  pillLabel = 'awaiting admin approval'; }
+        if (isRejected) { pillClass = 'rejected'; pillLabel = 'settlement rejected — resubmit'; }
+
+        const actions = el('div', { class: 'admin-actions' },
+          el('button', { class: 'view', onclick: () => viewSubmission(adv.id) }, 'View')
+        );
+        if (canSettle) {
+          actions.appendChild(el('button', { class: 'approve', onclick: () => startSettle(adv) }, 'Settle'));
+        }
         card.appendChild(el('div', { class: 'adv-row-foot' },
-          el('div', {},
-            el('span', { class: 'status-pill ' + (isRejected ? 'rejected' : 'approved') },
-              isRejected ? 'settlement rejected — resubmit' : 'advance approved · awaiting settlement'
-            )
-          ),
-          el('div', { class: 'admin-actions' },
-            el('button', { class: 'view', onclick: () => viewSubmission(adv.id) }, 'View'),
-            el('button', { class: 'approve', onclick: () => startSettle(adv) }, 'Settle')
-          )
+          el('div', {}, el('span', { class: 'status-pill ' + pillClass }, pillLabel)),
+          actions
         ));
         root.appendChild(card);
       }
@@ -782,7 +789,7 @@
         'Open Travel Advances',
         el('span', { class: 'card-badge', id: 'openAdvBadge' }, '0')
       ),
-      el('p', {}, 'You have advances awaiting settlement after travel. Click to settle.'),
+      el('p', {}, 'Track and settle your travel advances. Pending advances awaiting approval are listed here too.'),
       el('div', { class: 'arrow' }, el('span', {}, 'Settle'), el('div', { html: ICONS.arrow }))
     );
     grid.appendChild(openAdvCard);

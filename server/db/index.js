@@ -235,12 +235,15 @@ const stmts = {
     UPDATE submissions SET status='settlement_rejected', settlement_reviewed_by=@reviewed_by,
       settlement_reviewed_at=datetime('now'), settlement_note=@settlement_note WHERE id=@id
   `),
-  // Employees see their own open advances (advance_approved or settlement_rejected).
+  // Employees see all their in-flight advances:
+  //   pending             — awaiting first approval (no Settle button shown)
+  //   advance_approved    — disbursed, ready to be settled
+  //   settlement_rejected — settlement was rejected, employee can re-file
   listOpenAdvancesForEmployee: db.prepare(`
     SELECT id, reference, period, total_amount, status, submitted_at, reviewed_at, payload_json
     FROM submissions
     WHERE employee_id = ? AND form_type = 'met_advance'
-      AND status IN ('advance_approved', 'settlement_rejected')
+      AND status IN ('pending', 'advance_approved', 'settlement_rejected')
     ORDER BY submitted_at DESC
   `),
   // OneDrive sync flags
