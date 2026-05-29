@@ -1539,6 +1539,14 @@
         }),
       });
       state.lastSubmission = res.submission;
+      // Wipe the upload state immediately after a successful submit. The
+      // server has already claimed and deleted these pending rows, but the
+      // client must forget the token too so no subsequent action can ever
+      // re-use it for another form. (Defensive — openForm regenerates it
+      // anyway, but if some flow re-enters the form view without going
+      // through openForm, this prevents the stale token from being sent.)
+      state.uploadToken = null;
+      state.uploads = [];
       route('success');
     } catch (err) {
       toast(err.message || 'Submission failed', 'error');

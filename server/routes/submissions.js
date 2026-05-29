@@ -47,6 +47,8 @@ router.post('/', requireAuth, async (req, res) => {
 
     // 2) Collect attachments from pending uploads
     const pending = upload_token ? stmts.listPendingByToken.all(upload_token, req.user.id) : [];
+    console.log(`[submit] user=${req.user.email} form=${form_type} token=${upload_token} pending_count=${pending.length}`,
+      pending.map(p => ({ id: p.id, file: p.filename, created: p.created_at })));
     const attachments = pending.map(p => ({
       filename: p.filename,
       stored_path: p.stored_path,
@@ -143,6 +145,13 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
   if (sub.employee_id !== req.user.id && !isAdmin) {
     return res.status(403).json({ error: 'Forbidden' });
   }
+  // Diagnostic: log exactly which attachments are linked to this submission.
+  // This makes any cross-submission contamination immediately visible in Render logs.
+  try {
+    const attRows = stmts.listAttachments.all(sub.id);
+    console.log(`[pdf] sub=${sub.id} ref=${sub.reference} status=${sub.status} attachments=${attRows.length}`,
+      attRows.map(a => ({ id: a.id, file: a.filename, path: a.stored_path })));
+  } catch (_) {}
   try {
     let filePath;
     if (sub.pdf_path && fs.existsSync(sub.pdf_path)) {
