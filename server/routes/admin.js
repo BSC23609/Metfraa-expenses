@@ -29,15 +29,35 @@ router.get('/pending', requireAdmin, (req, res) => {
 });
 
 // ---- Approve a submission -----------------------------------------
-//  Generates the merged report (report + bills), stores it on OneDrive
-//  under <Employee>/Reports/, flips status to approved, updates Excel.
+//  For most forms: generates the merged report (report + bills), stores it
+//  on OneDrive under <Employee>/Reports/, flips status to 'approved',
+//  updates Excel.
+//
+//  For Travel Advance requests: there are no bills yet — the advance stays
+//  OPEN. We flip status to 'advance_approved' and skip the bill-merge step.
+//  The advance closes later via the settlement endpoints below.
 router.post('/submissions/:id/approve', requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const sub = stmts.getSubmission.get(id);
   if (!sub) return res.status(404).json({ error: 'Submission not found.' });
-  if (sub.status === 'approved') return res.status(400).json({ error: 'Already approved.' });
+  if (sub.status !== 'pending') {
+    return res.status(400).json({ error: `Cannot approve a submission in '${sub.status}' status.` });
+  }
+
+  const isAdvance = sub.form_type === 'met_advance';
 
   try {
+    if (isAdvance) {
+      // Advance: keep it open, awaiting employee settlement after the trip.
+      stmts.approveAdvanceRequest.run({ id, reviewed_by: req.user.email, review_note: (req.body && req.body.note) || '' });
+      stmts.insertAudit.run({
+        actor_email: req.user.email, action: 'APPROVE_ADVANCE', target_type: 'submission', target_id: id,
+        meta_json: JSON.stringify({ ref: sub.reference }),
+        ip_address: req.ip,
+      });
+      return res.json({ ok: true, advance_open: true, pdf_url: `/api/submissions/${id}/pdf` });
+    }
+
     // Mark approved first (so the Excel row reflects it)
     stmts.approveSubmission.run({ id, reviewed_by: req.user.email, review_note: (req.body && req.body.note) || '' });
 
@@ -62,6 +82,68 @@ router.post('/submissions/:id/approve', requireAdmin, async (req, res) => {
     console.error('[approve]', err);
     res.status(500).json({ error: err.message || 'Approval failed' });
   }
+});
+
+// ---- Approve a settlement (Travel Advance, second-stage approval) -----
+//   Triggered after the employee has filed actuals + bills against an
+//   open advance. Closes the advance (status='settled') and runs the
+//   normal report/merge/OneDrive flow.
+router.post('/submissions/:id/approve-settlement', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.form_type !== 'met_advance') {
+    return res.status(400).json({ error: 'Settlement approval only applies to Travel Advance submissions.' });
+  }
+  if (sub.status !== 'settlement_pending') {
+    return res.status(400).json({ error: `Cannot approve settlement from '${sub.status}' status.` });
+  }
+  try {
+    stmts.approveSettlement.run({
+      id, reviewed_by: req.user.email,
+      settlement_note: (req.body && req.body.note) || '',
+    });
+    const fresh = stmts.getSubmission.get(id);
+    const reportPdfPath = await buildReportPdf(fresh, { draft: false });
+    const attachments = stmts.listAttachments.all(id);
+    const employee = {
+      name: sub.employee_name, email: sub.employee_email, employee_code: sub.employee_code,
+      level: sub.level, designation: sub.designation, department: sub.department,
+    };
+    const result = await syncSvc.onApprove(fresh, employee, attachments, reportPdfPath);
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'APPROVE_SETTLEMENT', target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, od_synced: result.synced }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true, settled: true, od_synced: result.synced });
+  } catch (err) {
+    console.error('[approve-settlement]', err);
+    res.status(500).json({ error: err.message || 'Settlement approval failed' });
+  }
+});
+
+// ---- Reject a settlement (employee may re-file) ----------------------
+router.post('/submissions/:id/reject-settlement', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.form_type !== 'met_advance') {
+    return res.status(400).json({ error: 'Settlement rejection only applies to Travel Advance submissions.' });
+  }
+  if (sub.status !== 'settlement_pending') {
+    return res.status(400).json({ error: `Cannot reject settlement from '${sub.status}' status.` });
+  }
+  stmts.rejectSettlement.run({
+    id, reviewed_by: req.user.email,
+    settlement_note: (req.body && req.body.note) || '',
+  });
+  stmts.insertAudit.run({
+    actor_email: req.user.email, action: 'REJECT_SETTLEMENT', target_type: 'submission', target_id: id,
+    meta_json: JSON.stringify({ ref: sub.reference, note: (req.body && req.body.note) || '' }),
+    ip_address: req.ip,
+  });
+  res.json({ ok: true, rejected: true });
 });
 
 // ---- Reject a submission ------------------------------------------

@@ -140,6 +140,20 @@ db.exec(`
   add('od_uploads_synced', `od_uploads_synced INTEGER NOT NULL DEFAULT 0`);
   add('od_report_synced',  `od_report_synced INTEGER NOT NULL DEFAULT 0`);
   add('od_error',          `od_error TEXT`);
+  // Advance-settlement workflow columns (added after Travel Advance form launch).
+  // Statuses possible on submissions:
+  //   pending             — newly submitted, awaiting first review
+  //   approved            — non-advance forms: final approved state
+  //   rejected            — final rejected state
+  //   advance_approved    — Travel Advance: first approval done, advance is open, awaiting settlement
+  //   settlement_pending  — Travel Advance: employee has submitted settlement, awaiting second review
+  //   settled             — Travel Advance: settlement approved, advance closed
+  //   settlement_rejected — Travel Advance: settlement rejected, employee may resubmit
+  add('actuals_json',            `actuals_json TEXT`);
+  add('settled_at',              `settled_at TEXT`);
+  add('settlement_reviewed_by',  `settlement_reviewed_by TEXT`);
+  add('settlement_reviewed_at',  `settlement_reviewed_at TEXT`);
+  add('settlement_note',         `settlement_note TEXT`);
   // Normalise any legacy 'submitted' status to 'pending'
   db.exec(`UPDATE submissions SET status='pending' WHERE status='submitted'`);
 
@@ -196,6 +210,38 @@ const stmts = {
   rejectSubmission: db.prepare(`
     UPDATE submissions SET status='rejected', reviewed_by=@reviewed_by,
       reviewed_at=datetime('now'), review_note=@review_note WHERE id=@id
+  `),
+  // -- Travel Advance settlement lifecycle ---------------------------
+  // Used by admin approve when the form is met_advance — keeps the advance
+  // OPEN (status='advance_approved') instead of closing it as 'approved'.
+  approveAdvanceRequest: db.prepare(`
+    UPDATE submissions SET status='advance_approved', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note WHERE id=@id
+  `),
+  // Employee files the settlement: attaches actuals + bills, status flips to
+  // 'settlement_pending' (awaiting second admin approval).
+  fileSettlement: db.prepare(`
+    UPDATE submissions SET status='settlement_pending', actuals_json=@actuals_json,
+      settled_at=datetime('now') WHERE id=@id
+  `),
+  // Admin approves the settlement: status -> 'settled' (closed).
+  approveSettlement: db.prepare(`
+    UPDATE submissions SET status='settled', settlement_reviewed_by=@reviewed_by,
+      settlement_reviewed_at=datetime('now'), settlement_note=@settlement_note WHERE id=@id
+  `),
+  // Admin rejects the settlement: status -> 'settlement_rejected'. Employee
+  // may re-file (which will flip back to 'settlement_pending').
+  rejectSettlement: db.prepare(`
+    UPDATE submissions SET status='settlement_rejected', settlement_reviewed_by=@reviewed_by,
+      settlement_reviewed_at=datetime('now'), settlement_note=@settlement_note WHERE id=@id
+  `),
+  // Employees see their own open advances (advance_approved or settlement_rejected).
+  listOpenAdvancesForEmployee: db.prepare(`
+    SELECT id, reference, period, total_amount, status, submitted_at, reviewed_at, payload_json
+    FROM submissions
+    WHERE employee_id = ? AND form_type = 'met_advance'
+      AND status IN ('advance_approved', 'settlement_rejected')
+    ORDER BY submitted_at DESC
   `),
   // OneDrive sync flags
   markLogSynced:     db.prepare(`UPDATE submissions SET od_log_synced=1, od_error=NULL WHERE id=?`),

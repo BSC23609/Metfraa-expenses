@@ -129,6 +129,89 @@ router.get('/', requireAuth, (req, res) => {
   res.json({ submissions: rows });
 });
 
+// GET /api/submissions/open-advances — list user's open Travel Advances
+//   (status = 'advance_approved' or 'settlement_rejected') so they can settle them.
+router.get('/open-advances', requireAuth, (req, res) => {
+  const rows = stmts.listOpenAdvancesForEmployee.all(req.user.id).map(r => ({
+    ...r,
+    payload: (() => { try { return JSON.parse(r.payload_json || '{}'); } catch (_) { return {}; } })(),
+    payload_json: undefined,
+  }));
+  res.json({ advances: rows });
+});
+
+// POST /api/submissions/:id/settle — file the settlement for an open advance
+//   Body: { upload_token, actuals: { actual_amount, notes? } }
+//   - Requires status = 'advance_approved' or 'settlement_rejected' (re-file)
+//   - Requires ownership (must be the original employee)
+//   - Adds any pending uploads as attachments on the SAME submission
+//   - Flips status to 'settlement_pending' (admin must approve)
+router.post('/:id/settle', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const sub = stmts.getSubmission.get(id);
+    if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+    if (sub.employee_id !== req.user.id) return res.status(403).json({ error: 'Not your submission.' });
+    if (sub.form_type !== 'met_advance') {
+      return res.status(400).json({ error: 'Only Travel Advance submissions can be settled.' });
+    }
+    if (!['advance_approved', 'settlement_rejected'].includes(sub.status)) {
+      return res.status(400).json({ error: `Cannot settle from status '${sub.status}'.` });
+    }
+
+    const { upload_token, actuals } = req.body || {};
+    const actualAmount = parseFloat(actuals && actuals.actual_amount);
+    if (!(actualAmount >= 0)) {
+      return res.status(400).json({ error: 'Actual amount spent is required (₹0 or more).' });
+    }
+
+    // 1) Claim pending uploads as attachments on this submission.
+    const pending = upload_token ? stmts.listPendingByToken.all(upload_token, req.user.id) : [];
+    if (pending.length === 0) {
+      return res.status(400).json({ error: 'At least one bill is required to settle the advance.' });
+    }
+
+    // 2) Persist settlement: add attachments + update submission.
+    const tx = db.transaction(() => {
+      for (const p of pending) {
+        stmts.insertAttachment.run({
+          submission_id: id,
+          filename: p.filename, stored_path: p.stored_path,
+          mime_type: p.mime_type, size_bytes: p.size_bytes,
+          category: 'settlement', label: '',
+        });
+      }
+      stmts.fileSettlement.run({
+        id,
+        actuals_json: JSON.stringify({
+          actual_amount: +actualAmount.toFixed(2),
+          notes: (actuals.notes || '').trim() || null,
+          advance_amount: sub.total_amount,
+          difference: +(actualAmount - sub.total_amount).toFixed(2), // +ve = company owes more, -ve = employee returns
+        }),
+      });
+      if (upload_token) stmts.deletePendingByToken.run(upload_token);
+    });
+    tx();
+
+    console.log(`[settle] user=${req.user.email} sub=${id} ref=${sub.reference} actual=${actualAmount} advance=${sub.total_amount} bills=${pending.length}`);
+
+    res.json({
+      ok: true,
+      submission: {
+        id, reference: sub.reference, status: 'settlement_pending',
+        advance_amount: sub.total_amount,
+        actual_amount: +actualAmount.toFixed(2),
+        difference: +(actualAmount - sub.total_amount).toFixed(2),
+        message: 'Settlement filed. Awaiting admin approval.',
+      },
+    });
+  } catch (err) {
+    console.error('[settle]', err);
+    res.status(500).json({ error: err.message || 'Settlement failed' });
+  }
+});
+
 // Build a report PDF on-demand (used for draft preview of pending items)
 const { buildReportPdf, buildMergedPreview } = require('../services/report-builder');
 
@@ -204,6 +287,12 @@ router.get('/:id', requireAuth, (req, res) => {
       form_type: sub.form_type, period: sub.period, total_amount: sub.total_amount,
       status: sub.status, submitted_at: sub.submitted_at, email_sent_at: sub.email_sent_at,
       reviewed_by: sub.reviewed_by, reviewed_at: sub.reviewed_at, review_note: sub.review_note,
+      // Travel-advance settlement fields (null for non-advance submissions)
+      actuals: sub.actuals_json ? JSON.parse(sub.actuals_json) : null,
+      settled_at: sub.settled_at,
+      settlement_reviewed_by: sub.settlement_reviewed_by,
+      settlement_reviewed_at: sub.settlement_reviewed_at,
+      settlement_note: sub.settlement_note,
       payload: JSON.parse(sub.payload_json || '{}'),
       employee: {
         name: sub.employee_name, email: sub.employee_email, code: sub.employee_code,
