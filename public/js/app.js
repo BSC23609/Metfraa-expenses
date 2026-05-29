@@ -39,10 +39,11 @@
     ],
     metfraa: [
       { key: 'met_local',         title: 'Local Travel Allowance',           desc: 'Site / official travel using personal vehicle.', icon: 'bike' },
-      { key: 'met_cab',           title: 'Cab Reimbursement',                 desc: 'Cab / taxi fare reimbursement for trips of 80 km or more.', icon: 'taxi' },
+      { key: 'met_cab',           title: 'Cab Reimbursement',                 desc: 'Cab / taxi fare reimbursement for trips of 80 km or more (up & down combined).', icon: 'taxi' },
       { key: 'met_accommodation', title: 'Monthly Accommodation Reimbursement', desc: 'Site accommodation reimbursement.', icon: 'building' },
       { key: 'met_outstation',    title: 'Outstation Travel Reimbursement',  desc: 'Inter-city official travel.', icon: 'briefcase' },
       { key: 'met_misc',          title: 'Miscellaneous Reimbursements',      desc: 'Any other work expense — date, purpose, amount + bill.', icon: 'receipt' },
+      { key: 'met_advance',       title: 'Travel Advance Request',            desc: 'Request an upfront amount for an upcoming official trip.', icon: 'briefcase' },
     ],
   };
 
@@ -245,13 +246,30 @@
           });
         });
       });
+    } else if (s.form_type === 'met_advance') {
+      head(['Field', 'Detail']);
+      const rows = [
+        ['Destination',    p.destination || '—'],
+        ['Travel from',    formatDate(p.travel_from)],
+        ['Travel to',      formatDate(p.travel_to)],
+        ['Mode of travel', p.mode || 'Not specified'],
+        ['Purpose',        p.purpose || '—'],
+      ];
+      if (p.notes) rows.push(['Notes', p.notes]);
+      rows.forEach(([label, val]) => body.appendChild(el('tr', {},
+        el('td', { style: 'font-weight:600;width:30%;' }, label),
+        el('td', {}, val)
+      )));
     }
     t.appendChild(body);
     wrap.appendChild(t);
 
     // Total
+    const totalLabel = s.form_type === 'met_advance'
+      ? 'Advance Amount Requested'
+      : 'Total Reimbursement Claim';
     wrap.appendChild(el('div', { class: 'vd-total' },
-      el('span', {}, 'Total Reimbursement Claim'),
+      el('span', {}, totalLabel),
       el('strong', {}, money(s.total_amount))
     ));
 
@@ -593,6 +611,17 @@
         return { period, trips: [emptyOutstationTrip()] };
       case 'met_misc':
         return { period, items: [{ date: '', purpose: '', amount: '' }] };
+      case 'met_advance':
+        return {
+          period,
+          destination: '',
+          travel_from: '',
+          travel_to: '',
+          mode: '',
+          purpose: '',
+          notes: '',
+          amount: '',
+        };
     }
   }
 
@@ -605,6 +634,7 @@
     met_accommodation: 'Monthly Accommodation Reimbursement',
     met_outstation: 'Outstation Travel Reimbursement',
     met_misc:       'Miscellaneous Reimbursements',
+    met_advance:    'Travel Advance Request',
   };
 
   function renderForm() {
@@ -615,9 +645,10 @@
     // entitlement banner per form
     renderEntitlementBanner();
 
-    // Cab is now a reimbursement (has a total + bills), so show both.
-    $('#uploadSection').style.display = '';
-    $('#summaryBar').style.display = '';
+    // Travel Advance is pre-trip — no bills yet, no item-list total to live-update.
+    const isAdvance = state.currentForm === 'met_advance';
+    $('#uploadSection').style.display = isAdvance ? 'none' : '';
+    $('#summaryBar').style.display    = isAdvance ? 'none' : '';
 
     switch (state.currentForm) {
       case 'bsc_conveyance': renderConveyanceForm(body, 'bsc'); break;
@@ -626,6 +657,7 @@
       case 'met_outstation': renderExpenseForm(body, 'metfraa'); break;
       case 'met_cab':        renderCabForm(body); break;
       case 'met_misc':       renderMiscForm(body); break;
+      case 'met_advance':    renderAdvanceForm(body); break;
       case 'met_accommodation': renderAccommodationForm(body); break;
     }
 
@@ -650,7 +682,7 @@
       value = 'Bike <strong>₹3.5/km</strong>  ·  Car <strong>₹5/km</strong>';
     } else if (F === 'met_local') {
       label = 'Rates';
-      value = 'Bike <strong>₹4/km</strong>  ·  Car <strong>₹10/km</strong>  ·  Min trip <strong>5 km</strong>  ·  Car only for <strong>80 km+</strong>';
+      value = 'Bike <strong>₹4/km</strong>  ·  Car <strong>₹10/km</strong>  ·  Min trip <strong>5 km</strong>  ·  Car only for <strong>80 km+ (up &amp; down combined)</strong>';
     } else if (F === 'bsc_expense') {
       const e = state.policy.forms.expense.per_level[lvl];
       if (e) value = `Food <strong>₹${fmt(e.food_per_day)}/day</strong>  ·  Accom <strong>₹${fmt(e.accommodation_per_day)}/day</strong>  ·  ${e.long_distance.join(' / ')}`;
@@ -665,10 +697,13 @@
       label = `Level ${lvl} entitlement`;
     } else if (F === 'met_cab') {
       label = 'Eligibility';
-      value = 'Applicable for trips <strong>80 km+</strong> only  ·  attach the cab/taxi bill';
+      value = 'Applicable for trips <strong>80 km+ (up &amp; down combined)</strong> only  ·  attach the cab/taxi bill';
     } else if (F === 'met_misc') {
       label = 'Reimbursement';
       value = 'Enter each expense with date, purpose &amp; amount  ·  attach the bill for each';
+    } else if (F === 'met_advance') {
+      label = 'Advance Request';
+      value = 'For upcoming trips only  ·  enter estimated amount + justification  ·  settle after travel with actual bills';
     }
 
     if (!value) return;
@@ -886,7 +921,7 @@
     body.appendChild(el('div', { class: 'card', style: 'border-left:3px solid var(--bsg-warning);' },
       el('div', { class: 'card-title' }, 'Eligibility'),
       el('p', { style: 'margin:0;color:var(--bsg-text);line-height:1.6;' },
-        'Cab reimbursement applies only to journeys of ', el('strong', {}, '80 km or more'),
+        'Cab reimbursement applies only to journeys of ', el('strong', {}, '80 km or more (up & down combined)'),
         '. Shorter trips are not eligible. Attach the cab/taxi bill for each fare claimed.')
     ));
 
@@ -969,6 +1004,68 @@
 
     itemsCard.appendChild(el('button', { class: 'add-row-btn', onclick: () => { fd.items.push({ date:'', purpose:'', amount:'' }); renderForm(); } }, '+ Add Item'));
     body.appendChild(itemsCard);
+  }
+
+  // ---- Travel Advance Request ------------------------------------
+  function renderAdvanceForm(body) {
+    const fd = state.formData;
+
+    // Trip details
+    body.appendChild(el('div', { class: 'card' },
+      el('div', { class: 'card-title' }, 'Trip Details'),
+      el('div', { class: 'field-grid' },
+        field('adv_destination', 'Destination',     'text',  fd.destination, true,  v => { fd.destination = v; }, 'e.g. Bangalore'),
+        field('adv_mode',        'Mode of Travel',  'text',  fd.mode,        false, v => { fd.mode = v; },        'Train / Bus / Car / Flight')
+      ),
+      el('div', { class: 'field-grid' },
+        field('adv_from', 'Travel From (Date)', 'date', fd.travel_from, true, v => { fd.travel_from = v; }),
+        field('adv_to',   'Travel To (Date)',   'date', fd.travel_to,   true, v => { fd.travel_to = v; })
+      )
+    ));
+
+    // Purpose & amount
+    const justCard = el('div', { class: 'card' },
+      el('div', { class: 'card-title' }, 'Purpose & Estimated Amount')
+    );
+    // Purpose (textarea-style — wider, with help text)
+    const purposeField = el('div', { class: 'field full' },
+      el('label', {}, 'Purpose / Justification ', el('span', { class: 'req' }, '*')),
+      el('textarea', {
+        class: 'ti', rows: 4,
+        placeholder: 'e.g. Site visit at the Bangalore project — review structural work and meet client. Expected 3 days.',
+        oninput: (e) => { fd.purpose = e.target.value; }
+      })
+    );
+    // Set textarea value after creation (oninput-style attrs don't carry initial value reliably)
+    setTimeout(() => { const ta = purposeField.querySelector('textarea'); if (ta) ta.value = fd.purpose || ''; }, 0);
+    justCard.appendChild(purposeField);
+
+    justCard.appendChild(el('div', { class: 'field-grid' },
+      field('adv_amount', 'Estimated Advance Amount (₹)', 'number', fd.amount, true,
+        v => { fd.amount = v; updateSummary(); }, '0.00')
+    ));
+
+    justCard.appendChild(el('div', { class: 'field full' },
+      el('label', {}, 'Additional Notes (optional)'),
+      el('textarea', {
+        class: 'ti', rows: 2,
+        placeholder: 'Anything else management should know — accompanying staff, special requirements, etc.',
+        oninput: (e) => { fd.notes = e.target.value; }
+      })
+    ));
+    setTimeout(() => { const tas = justCard.querySelectorAll('textarea'); if (tas[1]) tas[1].value = fd.notes || ''; }, 0);
+
+    body.appendChild(justCard);
+
+    // Settlement reminder card (informational)
+    body.appendChild(el('div', { class: 'card', style: 'background:rgba(37,99,235,0.06);border-left:3px solid var(--bsg-blue);' },
+      el('div', { class: 'card-title' }, 'After your trip'),
+      el('p', { style: 'margin:0;font-size:13px;color:var(--bsg-ink);' },
+        'Submit your actual bills via the reimbursement forms after travel. ',
+        'If you have spent less than the advance, return the balance to finance. ',
+        'If you have spent more, the company will reimburse the difference against the bills.'
+      )
+    ));
   }
 
   // ---- Monthly Accommodation -------------------------------------
@@ -1089,6 +1186,11 @@
           if (a > 0) { total += a; count++; }
         }
         break;
+      case 'met_advance': {
+        const a = parseFloat(fd.amount) || 0;
+        if (a > 0) { total = a; count = 1; }
+        break;
+      }
     }
     return { total: +total.toFixed(2), count };
   }
@@ -1231,6 +1333,13 @@
       if (!fd.items.some(it => it.date && it.purpose && parseFloat(it.amount) > 0)) {
         fail('Add at least one complete item (date, purpose, amount).');
       }
+    } else if (F === 'met_advance') {
+      if (!fd.destination) fail('Destination is required.');
+      else if (!fd.travel_from) fail('Travel start date is required.');
+      else if (!fd.travel_to)   fail('Travel end date is required.');
+      else if (fd.travel_to < fd.travel_from) fail('Travel end date must be on or after the start date.');
+      else if (!fd.purpose || !fd.purpose.trim()) fail('Purpose / justification is required.');
+      else if (!(parseFloat(fd.amount) > 0)) fail('Estimated advance amount must be greater than zero.');
     } else if (F === 'met_accommodation') {
       if (!fd.period) fail('Reporting month is required.');
       if (!fd.entries.some(e => e.date && e.location && parseFloat(e.amount) > 0)) fail('Add at least one complete accommodation entry.');
@@ -1295,13 +1404,17 @@
       case 'met_outstation': renderExpensePreview(root, fd, F === 'met_outstation'); break;
       case 'met_cab': renderCabPreview(root, fd); break;
       case 'met_misc': renderMiscPreview(root, fd); break;
+      case 'met_advance': renderAdvancePreview(root, fd); break;
       case 'met_accommodation': renderAccommodationPreview(root, fd); break;
     }
 
-    // Grand total (all Metfraa forms are now reimbursements with a total)
+    // Grand total (label varies by form type)
     {
+      const totalLabel = F === 'met_advance'
+        ? 'Advance Amount Requested'
+        : 'Total Reimbursement Claim';
       root.appendChild(el('div', { class: 'grand-total' },
-        el('div', { class: 'lbl' }, 'Total Reimbursement Claim'),
+        el('div', { class: 'lbl' }, totalLabel),
         el('div', { class: 'amt' }, el('span', { class: 'cur' }, '₹'), fmt(total))
       ));
     }
@@ -1455,6 +1568,37 @@
         el('td', {}, formatDate(it.date)),
         el('td', {}, it.purpose || '—'),
         el('td', { class: 'num' }, fmt(parseFloat(it.amount) || 0))
+      ));
+    }
+    table.appendChild(tbody);
+    section.appendChild(table);
+    root.appendChild(section);
+  }
+
+  function renderAdvancePreview(root, fd) {
+    const section = el('div', { class: 'trip-section' });
+    section.appendChild(el('div', { class: 'trip-banner' },
+      el('div', { class: 'l' }, el('strong', {}, 'TRAVEL ADVANCE'), 'Upcoming trip — settled after travel'),
+      el('div', { class: 'r' }, '')
+    ));
+    // Two-col table of trip details
+    const table = el('table');
+    table.appendChild(el('thead', {}, el('tr', {},
+      ...['Field','Detail'].map(h => el('th', {}, h))
+    )));
+    const tbody = el('tbody');
+    const rows = [
+      ['Destination',    fd.destination || '—'],
+      ['Travel from',    formatDate(fd.travel_from)],
+      ['Travel to',      formatDate(fd.travel_to)],
+      ['Mode of travel', fd.mode || 'Not specified'],
+      ['Purpose',        fd.purpose || '—'],
+    ];
+    if (fd.notes) rows.push(['Notes', fd.notes]);
+    for (const [label, val] of rows) {
+      tbody.appendChild(el('tr', {},
+        el('td', { style: 'font-weight:600;width:30%;' }, label),
+        el('td', {}, val)
       ));
     }
     table.appendChild(tbody);
@@ -1719,7 +1863,7 @@
   const FORM_LABEL = {
     met_local: 'Local Travel', met_cab: 'Cab Reimbursement',
     met_accommodation: 'Accommodation', met_outstation: 'Outstation',
-    met_misc: 'Miscellaneous',
+    met_misc: 'Miscellaneous', met_advance: 'Travel Advance',
     bsc_conveyance: 'Local Conveyance', bsc_expense: 'Travel Expense',
   };
   function fmtDateShort(s) {

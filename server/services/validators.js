@@ -282,6 +282,26 @@ function validateMetMisc(input, employee) {
   return ok({ items, period: input.period || '' }, +total.toFixed(2));
 }
 
+// ---- Metfraa: Travel Advance Request -------------------------------
+function validateMetAdvance(input, employee) {
+  const amount = parseFloat(input.amount);
+  if (!(amount > 0))                     return err('Estimated advance amount (₹) is required and must be greater than zero.');
+  if (!isStr(input.destination))         return err('Destination is required');
+  if (!isDate(input.travel_from))        return err('Travel start date is required');
+  if (!isDate(input.travel_to))          return err('Travel end date is required');
+  if (input.travel_to < input.travel_from) return err('Travel end date must be on or after the start date');
+  if (!isStr(input.purpose))             return err('Purpose / justification is required');
+  return ok({
+    destination: input.destination.trim(),
+    travel_from: input.travel_from,
+    travel_to:   input.travel_to,
+    purpose:     input.purpose.trim(),
+    mode:        (input.mode || '').trim() || null,   // optional: train / bus / car / flight / other
+    notes:       (input.notes || '').trim() || null,
+    amount:      +amount.toFixed(2),
+  }, +amount.toFixed(2));
+}
+
 const VALIDATORS = {
   bsc_conveyance:    validateBscConveyance,
   bsc_expense:       validateBscExpense,
@@ -290,6 +310,7 @@ const VALIDATORS = {
   met_accommodation: validateMetAccommodation,
   met_outstation:    validateMetOutstation,
   met_misc:          validateMetMisc,
+  met_advance:       validateMetAdvance,
 };
 
 const FORM_META = {
@@ -300,6 +321,7 @@ const FORM_META = {
   met_accommodation: { company: 'metfraa', title: 'Monthly Accommodation Reimbursement', subtitle: 'Metfraa / ACC', policyForm: 'accommodation' },
   met_outstation:    { company: 'metfraa', title: 'Outstation Travel Reimbursement',  subtitle: 'Metfraa / OUT', policyForm: 'outstation' },
   met_misc:          { company: 'metfraa', title: 'Miscellaneous Reimbursement',      subtitle: 'Metfraa / MISC', policyForm: 'misc' },
+  met_advance:       { company: 'metfraa', title: 'Travel Advance Request',           subtitle: 'Metfraa / ADV',  policyForm: 'advance' },
 };
 
 function validate(formType, input, employee) {

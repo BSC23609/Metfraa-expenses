@@ -190,9 +190,12 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
       doc.moveDown(1);
       const banY = doc.y;
       const banH = 56;
+      const totalLabel = submission.form_type === 'met_advance'
+        ? 'ADVANCE AMOUNT REQUESTED'
+        : 'TOTAL REIMBURSEMENT CLAIM';
       doc.rect(50, banY, doc.page.width - 100, banH).fillColor(BLUE).fill();
       doc.fontSize(10).fillColor('white').font('Helvetica')
-         .text('TOTAL REIMBURSEMENT CLAIM', 70, banY + 14, { characterSpacing: 1.6 });
+         .text(totalLabel, 70, banY + 14, { characterSpacing: 1.6 });
       doc.fontSize(22).fillColor('white').font('Helvetica-Bold')
          .text(`₹ ${fmt(submission.total_amount)}`,
             50, banY + 16,
@@ -282,6 +285,7 @@ function renderBody(doc, sub, payload, formMeta) {
     case 'met_accommodation':    return renderMetAccommodation(doc, payload);
     case 'met_outstation':       return renderMetOutstation(doc, payload);
     case 'met_misc':             return renderMetMisc(doc, payload);
+    case 'met_advance':          return renderMetAdvance(doc, payload);
     default:
       doc.fontSize(11).fillColor(INK).text(JSON.stringify(payload, null, 2));
   }
@@ -451,6 +455,33 @@ function renderMetMisc(doc, p) {
     `₹ ${fmt(parseFloat(it.amount) || 0)}`,
   ]));
   table(doc, ['Date', 'Purpose', 'Amount'], rows, [90, 290, 95], { numericCols: [2] });
+}
+
+// ---- Metfraa: Travel Advance Request -------------------------------
+function renderMetAdvance(doc, p) {
+  sectionHeading(doc, 'Travel Advance — Trip Details');
+  table(doc, ['Field', 'Detail'],
+    [
+      ['Destination',     p.destination || '—'],
+      ['Travel from',     formatDate(p.travel_from)],
+      ['Travel to',       formatDate(p.travel_to)],
+      ['Mode of travel',  p.mode || 'Not specified'],
+    ],
+    [140, 350]
+  );
+  doc.moveDown(0.8);
+  sectionHeading(doc, 'Purpose / Justification');
+  doc.fontSize(11).fillColor(INK).font('Helvetica')
+     .text(p.purpose || '—', { width: doc.page.width - 100, align: 'left' });
+  if (p.notes) {
+    doc.moveDown(0.6);
+    doc.fontSize(9).fillColor(MUTED).font('Helvetica-Oblique')
+       .text('Additional notes: ' + p.notes, { width: doc.page.width - 100 });
+  }
+  doc.moveDown(0.8);
+  doc.fontSize(9).fillColor(MUTED).font('Helvetica-Oblique')
+     .text('Settlement: actual bills are to be submitted via the reimbursement forms after the trip. Any balance is returned by the employee, or reimbursed to them, as applicable.',
+           { width: doc.page.width - 100 });
 }
 
 // ---- Metfraa: Monthly Accommodation -------------------------------

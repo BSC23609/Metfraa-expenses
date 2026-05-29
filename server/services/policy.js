@@ -92,6 +92,7 @@ const POLICY = {
         },
         rules: [
           'Includes fuel, maintenance and service costs — no additional vehicle-related expenses reimbursed.',
+          'Car / 4-Wheeler travel applies only to journeys of 80 km or more (up and down combined). Shorter distances must use a two-wheeler.',
           'Company car (when allowed up to 80 km/day with prior approval) — taxi reimbursement for local travel is NOT applicable.',
           'Travel plan form and manager approval mandatory 1–2 days in advance.',
           'Travel under 5 km when reporting directly to a different location is NOT eligible.',
@@ -103,7 +104,7 @@ const POLICY = {
         description: 'Reimbursement for cab / taxi fare on eligible long-distance local travel.',
         min_km: 80,
         rules: [
-          'Applicable only for journeys of 80 km or more. Shorter trips are not eligible.',
+          'Applicable only for journeys of 80 km or more (up and down combined). Shorter trips are not eligible.',
           'Attach the cab/taxi bill or receipt for the fare claimed.',
           'For emergencies / late-night travel, document the reason clearly.',
         ],
@@ -141,6 +142,27 @@ const POLICY = {
           'Submit all claims to HR on or before the 28th of every month.',
           'Reimbursements processed monthly after verification & approval.',
           'Miscellaneous site expenses (materials, tools, labour) require proper recording and prior approval.',
+        ],
+      },
+      // 5) Miscellaneous Reimbursements
+      misc: {
+        title: 'Miscellaneous Reimbursements',
+        description: 'Catch-all for other work-related expenses with supporting bills.',
+        rules: [
+          'Each item needs a date, purpose and amount.',
+          'Attach the bill / receipt for every item.',
+          'Use only for expenses not covered by the other forms.',
+        ],
+      },
+      // 6) Travel Advance (upfront cash for an upcoming trip; settled later)
+      advance: {
+        title: 'Travel Advance Request',
+        description: 'Request an upfront amount for an upcoming official trip. Settled after the trip with actual bills.',
+        rules: [
+          'For upcoming trips only — submit before the travel date.',
+          'State the estimated amount and a clear justification (destination, purpose, duration).',
+          'Once approved by management, finance will disburse the advance.',
+          'After the trip, settle the advance by submitting actual bills via the reimbursement forms — any balance is either returned by the employee or reimbursed to them.',
         ],
       },
     },

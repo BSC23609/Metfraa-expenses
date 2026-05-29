@@ -38,10 +38,25 @@ const storage = multer.diskStorage({
   },
 });
 
+// Pattern that matches the system's own report filenames, e.g.
+//   MET-LT-260528-5405_PREVIEW (1).pdf
+//   BSC-CON-260101-AB12.pdf
+// Users sometimes pick a previously-downloaded report from their Downloads
+// folder thinking it's an invoice — block that to prevent confusion.
+const REPORT_FILENAME_RE = /^(MET|BSC)-[A-Z]{1,3}-\d{6}-[A-Z0-9]+/i;
+
 const fileFilter = (req, file, cb) => {
   const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf'];
-  if (allowed.includes(file.mimetype.toLowerCase())) return cb(null, true);
-  cb(new Error('Unsupported file type: ' + file.mimetype));
+  if (!allowed.includes(file.mimetype.toLowerCase())) {
+    return cb(new Error('Unsupported file type: ' + file.mimetype));
+  }
+  if (REPORT_FILENAME_RE.test(file.originalname)) {
+    return cb(new Error(
+      `"${file.originalname}" looks like a portal-generated report, not a bill. ` +
+      `Please upload the original invoice/receipt instead.`
+    ));
+  }
+  cb(null, true);
 };
 
 const upload = multer({
@@ -51,7 +66,17 @@ const upload = multer({
 });
 
 // POST /api/uploads — upload one or more files for a form-in-progress
-router.post('/', requireAuth, upload.array('files', 20), (req, res) => {
+router.post('/', requireAuth, (req, res, next) => {
+  upload.array('files', 20)(req, res, (err) => {
+    if (err) {
+      // Surface fileFilter / size-limit errors to the client with a clear message
+      // instead of letting them bubble up as 500s.
+      const msg = err.message || 'Upload failed';
+      return res.status(400).json({ error: msg });
+    }
+    next();
+  });
+}, (req, res) => {
   try {
     const uploadToken = (req.body.upload_token || '').trim();
     if (!uploadToken) return res.status(400).json({ error: 'upload_token required' });
