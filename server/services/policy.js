@@ -69,7 +69,7 @@ const POLICY = {
   // ================================================================
   //  METFRAA STEEL BUILDINGS PVT. LTD.
   //  Ref: HR Policy Manual 2026 — Section 04 / Travel, Food, Accommodation & Expense
-  //  Levels: L1 (Junior) / L2 (Intermediate) / L3 (Senior/Manager)
+  //  Levels: L1 (Junior Level) / L2 (Senior Level) / L3 (Managerial Level)
   // ================================================================
   metfraa: {
     name: 'Metfraa Steel Buildings Pvt. Ltd.',
@@ -77,9 +77,9 @@ const POLICY = {
     hr_email: 'admin@metfraa.com',
     cc_emails: [],
     levels: {
-      L1: { name: 'L1 — Junior Level',       criteria: 'Trainees, Associates, Assistants, Technicians, Junior Executives, Site Staff' },
-      L2: { name: 'L2 — Intermediate Level', criteria: 'Senior Executives, Coordinators, Site Engineers, Supervisors, Site Representatives' },
-      L3: { name: 'L3 — Senior / Manager',   criteria: 'Managers, Asst. Managers, Dy. Managers, DGMs, AGMs, General Managers' },
+      L1: { name: 'L1 — Junior Level',     criteria: 'Categorization is determined solely by the management based on role, responsibilities, experience, and organizational requirements.' },
+      L2: { name: 'L2 — Senior Level',     criteria: 'Categorization is determined solely by the management based on role, responsibilities, experience, and organizational requirements.' },
+      L3: { name: 'L3 — Managerial Level', criteria: 'Categorization is determined solely by the management based on role, responsibilities, experience, and organizational requirements.' },
     },
     forms: {
       // 1) Local Travel Allowance (own vehicle)

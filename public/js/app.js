@@ -327,7 +327,7 @@
     $('#umName').textContent = u.name;
     $('#umEmail').textContent = u.email;
     if (u.level) {
-      const levelName = { L1: 'Junior', L2: 'Senior', L3: 'Manager' }[u.level] || u.level;
+      const levelName = { L1: 'Junior', L2: 'Senior', L3: 'Managerial' }[u.level] || u.level;
       $('#umLevel').textContent = `METFRAA · ${String(levelName).toUpperCase()} (${u.level})`;
     } else {
       // Admin-only user (in ADMIN_EMAILS but not an employee) — no level.
@@ -1569,7 +1569,7 @@
   // ===================================================================
   //  ADMIN PANEL
   // ===================================================================
-  const LEVEL_LABEL = { L1: 'Junior', L2: 'Senior', L3: 'Manager' };
+  const LEVEL_LABEL = { L1: 'Junior', L2: 'Senior', L3: 'Managerial' };
 
   let adminTab = 'pending';
 

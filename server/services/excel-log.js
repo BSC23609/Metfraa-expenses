@@ -81,7 +81,7 @@ async function ensureWorkbook(employee) {
 }
 
 function rowFor(sub, employee) {
-  const LEVEL = { L1: 'Junior', L2: 'Senior', L3: 'Manager' };
+  const LEVEL = { L1: 'Junior', L2: 'Senior', L3: 'Managerial' };
   return [
     sub.reference,
     fmtDate(sub.submitted_at),
