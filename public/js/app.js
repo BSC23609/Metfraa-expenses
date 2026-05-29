@@ -24,6 +24,8 @@
     adminPending: [],        // pending submissions
     adminSubmissions: [],    // all submissions
     currentPage: null,       // for the global Back button history
+    openAdvances: [],        // employee's open Travel Advances awaiting settlement
+    settling: null,          // { advance: <row>, actual_amount: '', notes: '' } while user is settling
   };
 
   // ----- Constants ------------------------------------------------
@@ -197,9 +199,46 @@
     );
     wrap.appendChild(meta);
     if (s.reviewed_by) {
+      const reviewedLabel = s.form_type === 'met_advance'
+        ? (s.status === 'rejected' ? 'Rejected' : 'Advance approved')
+        : (s.status === 'approved' ? 'Approved' : 'Reviewed');
       wrap.appendChild(el('div', { class: 'vd-review' },
-        `${s.status === 'approved' ? 'Approved' : 'Reviewed'} by ${s.reviewed_by}${s.reviewed_at ? ' · ' + fmtDateShort(s.reviewed_at) : ''}${s.review_note ? ' · "' + s.review_note + '"' : ''}`
+        `${reviewedLabel} by ${s.reviewed_by}${s.reviewed_at ? ' · ' + fmtDateShort(s.reviewed_at) : ''}${s.review_note ? ' · "' + s.review_note + '"' : ''}`
       ));
+    }
+    // Settlement block (only for travel advances that have been settled or are awaiting settlement review)
+    if (s.form_type === 'met_advance' && s.actuals) {
+      const a = s.actuals;
+      const diff = a.difference;
+      const diffText = Math.abs(diff) < 0.01
+        ? 'Balanced — no money changes hands.'
+        : (diff < 0
+            ? `Employee to return ₹ ${fmt(Math.abs(diff))} to the company.`
+            : `Company to reimburse employee an additional ₹ ${fmt(diff)}.`);
+      wrap.appendChild(el('div', { class: 'vd-settlement' },
+        el('div', { class: 'vd-label' }, 'Settlement'),
+        el('div', { class: 'vd-grid' },
+          el('div', { class: 'vd-cell' },
+            el('div', { class: 'vd-label' }, 'Advance'),
+            el('div', { class: 'vd-value' }, '₹ ' + fmt(a.advance_amount))
+          ),
+          el('div', { class: 'vd-cell' },
+            el('div', { class: 'vd-label' }, 'Actual spent'),
+            el('div', { class: 'vd-value' }, '₹ ' + fmt(a.actual_amount))
+          ),
+          el('div', { class: 'vd-cell' },
+            el('div', { class: 'vd-label' }, 'Settled at'),
+            el('div', { class: 'vd-value' }, s.settled_at ? fmtDateShort(s.settled_at) : '—')
+          )
+        ),
+        el('div', { class: 'vd-diff ' + (Math.abs(diff) < 0.01 ? 'balanced' : (diff < 0 ? 'to-return' : 'to-claim')) }, diffText),
+        a.notes ? el('div', { style: 'margin-top:8px;font-size:13px;color:var(--bsg-muted);' }, 'Notes: ' + a.notes) : null
+      ));
+      if (s.settlement_reviewed_by) {
+        wrap.appendChild(el('div', { class: 'vd-review' },
+          `Settlement ${s.status === 'settled' ? 'approved' : 'rejected'} by ${s.settlement_reviewed_by}${s.settlement_reviewed_at ? ' · ' + fmtDateShort(s.settlement_reviewed_at) : ''}${s.settlement_note ? ' · "' + s.settlement_note + '"' : ''}`
+        ));
+      }
     }
 
     // Line items table per form type
@@ -387,6 +426,8 @@
     landing:     renderHub,   // Metfraa-only: 'landing' collapses into the hub
     hub:         renderHub,
     history:     renderHistory,
+    openAdvances: renderOpenAdvances,
+    settleAdvance: renderSettleAdvance,
     eligibility: renderEligibility,
     form:        renderForm,
     preview:     renderPreview,
@@ -487,6 +528,209 @@
     }
   }
 
+  // ===================================================================
+  //  OPEN ADVANCES  (employee: list of approved advances awaiting settle)
+  // ===================================================================
+  async function renderOpenAdvances() {
+    const root = $('#openAdvList');
+    if (!root) return;
+    root.innerHTML = '<div style="padding:30px;text-align:center;color:var(--bsg-muted);">Loading…</div>';
+    try {
+      const res = await api('/api/submissions/open-advances');
+      const list = res.advances || [];
+      state.openAdvances = list;
+      root.innerHTML = '';
+      if (!list.length) {
+        root.appendChild(el('div', { class: 'card', style: 'text-align:center;color:var(--bsg-muted);padding:48px;' },
+          'You have no open advances at the moment.'
+        ));
+        return;
+      }
+      for (const adv of list) {
+        const p = adv.payload || {};
+        const isRejected = adv.status === 'settlement_rejected';
+        const card = el('div', { class: 'card advance-list-card' });
+        card.appendChild(el('div', { class: 'adv-row-head' },
+          el('div', {},
+            el('div', { class: 'adv-ref' }, adv.reference),
+            el('div', { class: 'adv-dest' }, p.destination || '—',
+              p.travel_from ? el('span', { class: 'adv-dates' }, ` · ${formatDate(p.travel_from)} – ${formatDate(p.travel_to)}`) : null
+            )
+          ),
+          el('div', { class: 'adv-amt' },
+            el('span', { class: 'adv-amt-lbl' }, 'Advance'),
+            el('span', { class: 'adv-amt-val' }, '₹ ' + fmt(adv.total_amount))
+          )
+        ));
+        if (p.purpose) {
+          card.appendChild(el('div', { class: 'adv-purpose' }, p.purpose));
+        }
+        card.appendChild(el('div', { class: 'adv-row-foot' },
+          el('div', {},
+            el('span', { class: 'status-pill ' + (isRejected ? 'rejected' : 'approved') },
+              isRejected ? 'settlement rejected — resubmit' : 'advance approved · awaiting settlement'
+            )
+          ),
+          el('div', { class: 'admin-actions' },
+            el('button', { class: 'view', onclick: () => viewSubmission(adv.id) }, 'View'),
+            el('button', { class: 'approve', onclick: () => startSettle(adv) }, 'Settle')
+          )
+        ));
+        root.appendChild(card);
+      }
+    } catch (err) {
+      root.innerHTML = `<div class="card" style="color:var(--bsg-danger);text-align:center;padding:30px;">${err.message || 'Failed to load open advances.'}</div>`;
+    }
+  }
+
+  function startSettle(advance) {
+    state.settling = { advance, actual_amount: '', notes: '' };
+    state.uploadToken = uuid();
+    state.uploads = [];
+    route('settleAdvance');
+  }
+
+  function renderSettleAdvance() {
+    if (!state.settling) { route('openAdvances'); return; }
+    const adv = state.settling.advance;
+    const p = adv.payload || {};
+
+    // Summary card
+    const summary = $('#settleAdvanceSummary');
+    summary.innerHTML = '';
+    summary.appendChild(el('div', { class: 'card-title' }, 'Advance Being Settled'));
+    summary.appendChild(el('div', { class: 'vd-grid' },
+      el('div', { class: 'vd-cell' },
+        el('div', { class: 'vd-label' }, 'Reference'),
+        el('div', { class: 'vd-value' }, adv.reference)
+      ),
+      el('div', { class: 'vd-cell' },
+        el('div', { class: 'vd-label' }, 'Destination'),
+        el('div', { class: 'vd-value' }, p.destination || '—')
+      ),
+      el('div', { class: 'vd-cell' },
+        el('div', { class: 'vd-label' }, 'Travel Dates'),
+        el('div', { class: 'vd-value' }, p.travel_from ? `${formatDate(p.travel_from)} – ${formatDate(p.travel_to)}` : '—')
+      ),
+      el('div', { class: 'vd-cell' },
+        el('div', { class: 'vd-label' }, 'Advance Approved'),
+        el('div', { class: 'vd-value' }, '₹ ' + fmt(adv.total_amount))
+      )
+    ));
+
+    // Wire inputs
+    const actualInput = $('#settleActual');
+    const notesInput  = $('#settleNotes');
+    actualInput.value = state.settling.actual_amount || '';
+    notesInput.value  = state.settling.notes || '';
+    actualInput.oninput = (e) => { state.settling.actual_amount = e.target.value; updateSettleDifference(); };
+    notesInput.oninput  = (e) => { state.settling.notes = e.target.value; };
+
+    updateSettleDifference();
+    refreshSettleUploadList();
+    bindSettleUploadZone();
+
+    $('#settleSubmitBtn').onclick = submitSettlement;
+  }
+
+  function updateSettleDifference() {
+    const diffEl = $('#settleDifference');
+    if (!diffEl || !state.settling) return;
+    const advance = state.settling.advance.total_amount;
+    const actual = parseFloat(state.settling.actual_amount) || 0;
+    if (!state.settling.actual_amount) {
+      diffEl.innerHTML = '';
+      return;
+    }
+    const diff = +(actual - advance).toFixed(2);
+    if (Math.abs(diff) < 0.01) {
+      diffEl.className = 'settle-diff balanced';
+      diffEl.innerHTML = `<strong>Balanced.</strong> Actual exactly matches the advance — no money changes hands.`;
+    } else if (diff < 0) {
+      diffEl.className = 'settle-diff to-return';
+      diffEl.innerHTML = `<strong>To return:</strong> ₹ ${fmt(Math.abs(diff))} (advance was ₹ ${fmt(advance)}, you spent ₹ ${fmt(actual)}).`;
+    } else {
+      diffEl.className = 'settle-diff to-claim';
+      diffEl.innerHTML = `<strong>To be reimbursed:</strong> ₹ ${fmt(diff)} (advance was ₹ ${fmt(advance)}, you spent ₹ ${fmt(actual)}).`;
+    }
+  }
+
+  // Mini upload zone for the settlement page (separate from the form's main zone)
+  function refreshSettleUploadList() {
+    const list = $('#settleUploadList'); if (!list) return;
+    list.innerHTML = '';
+    for (const u of state.uploads) {
+      list.appendChild(el('div', { class: 'upload-item' },
+        el('span', { class: 'name' }, u.filename),
+        el('button', { class: 'remove', onclick: async () => {
+          try {
+            await api(`/api/uploads/${u.id}?token=${encodeURIComponent(state.uploadToken)}`, { method: 'DELETE' });
+            state.uploads = state.uploads.filter(x => x.id !== u.id);
+            refreshSettleUploadList();
+          } catch (e) { toast(e.message || 'Could not remove', 'error'); }
+        } }, '×')
+      ));
+    }
+  }
+
+  function bindSettleUploadZone() {
+    const zone = $('#settleUploadZone');
+    const input = $('#settleFileInput');
+    if (!zone || !input) return;
+    zone.onclick = () => input.click();
+    input.onchange = async () => {
+      if (!input.files || !input.files.length) return;
+      const fd = new FormData();
+      fd.append('upload_token', state.uploadToken);
+      for (const f of input.files) fd.append('files', f);
+      try {
+        showLoading('Uploading bills…');
+        const res = await api('/api/uploads', { method: 'POST', body: fd });
+        for (const up of res.uploads || []) state.uploads.push(up);
+        refreshSettleUploadList();
+      } catch (e) {
+        toast(e.message || 'Upload failed', 'error');
+      } finally {
+        hideLoading();
+        input.value = '';
+      }
+    };
+    zone.ondragover = (e) => { e.preventDefault(); zone.classList.add('drag'); };
+    zone.ondragleave = () => zone.classList.remove('drag');
+    zone.ondrop = (e) => {
+      e.preventDefault(); zone.classList.remove('drag');
+      input.files = e.dataTransfer.files; input.onchange();
+    };
+  }
+
+  async function submitSettlement() {
+    const st = state.settling;
+    if (!st) return;
+    const actual = parseFloat(st.actual_amount);
+    if (!(actual >= 0)) { toast('Actual amount spent is required.', 'error'); return; }
+    if (!state.uploads.length) { toast('Attach at least one bill before submitting.', 'error'); return; }
+
+    try {
+      showLoading('Submitting settlement…');
+      const res = await api(`/api/submissions/${st.advance.id}/settle`, {
+        method: 'POST',
+        body: JSON.stringify({
+          upload_token: state.uploadToken,
+          actuals: { actual_amount: actual, notes: st.notes || '' },
+        }),
+      });
+      toast('Settlement filed. Awaiting admin approval.', 'success');
+      state.settling = null;
+      state.uploadToken = null;
+      state.uploads = [];
+      route('openAdvances');
+    } catch (e) {
+      toast(e.message || 'Settlement failed', 'error');
+    } finally {
+      hideLoading();
+    }
+  }
+
   function renderHub() {
     const policy = state.policy;
     $('#hubTitle').textContent = policy ? policy.name : '';
@@ -531,6 +775,19 @@
         el('div', { class: 'arrow' }, el('span', {}, 'View'), el('div', { html: ICONS.arrow }))
       )
     );
+    // Open Advances card (only visible if the user has any open advances)
+    const openAdvCard = el('div', { class: 'option-card advance-card', id: 'openAdvancesCard', style: 'display:none;', onclick: () => route('openAdvances') },
+      el('div', { class: 'icon-wrap', html: ICONS.briefcase }),
+      el('h3', {},
+        'Open Travel Advances',
+        el('span', { class: 'card-badge', id: 'openAdvBadge' }, '0')
+      ),
+      el('p', {}, 'You have advances awaiting settlement after travel. Click to settle.'),
+      el('div', { class: 'arrow' }, el('span', {}, 'Settle'), el('div', { html: ICONS.arrow }))
+    );
+    grid.appendChild(openAdvCard);
+    // Async: load count + show card if > 0
+    refreshOpenAdvancesCount();
     // Eligibility card last
     grid.appendChild(
       el('div', { class: 'option-card eligibility', onclick: () => route('eligibility') },
@@ -543,6 +800,20 @@
         )
       )
     );
+  }
+
+  // Fetch and display the open-advances count on the hub
+  async function refreshOpenAdvancesCount() {
+    try {
+      const res = await api('/api/submissions/open-advances');
+      const list = res.advances || [];
+      state.openAdvances = list;
+      const card = $('#openAdvancesCard');
+      const badge = $('#openAdvBadge');
+      if (!card || !badge) return;
+      badge.textContent = list.length;
+      card.style.display = list.length > 0 ? '' : 'none';
+    } catch (_) { /* not fatal; just hide */ }
   }
 
   // ===================================================================
@@ -1764,8 +2035,12 @@
     $('#pendCount').textContent = `${rows.length} pending`;
     tbody.innerHTML = '';
     for (const s of rows) {
+      const isSettlement = s.status === 'settlement_pending';
       tbody.appendChild(el('tr', {},
-        el('td', {}, el('strong', {}, s.reference)),
+        el('td', {},
+          el('strong', {}, s.reference),
+          isSettlement ? el('span', { class: 'status-pill settlement_pending', style: 'margin-left:8px;font-size:9px;' }, 'settlement') : null
+        ),
         el('td', {}, s.employee_name),
         el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
         el('td', {}, s.period || '—'),
@@ -1774,8 +2049,8 @@
         el('td', {},
           el('div', { class: 'admin-actions' },
             el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
-            el('button', { class: 'approve', onclick: () => approveSubmission(s) }, 'Approve'),
-            el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, 'Reject')
+            el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : 'Approve'),
+            el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, isSettlement ? 'Reject Settlement' : 'Reject')
           )
         )
       ));
@@ -1824,16 +2099,26 @@
   }
 
   async function approveSubmission(s) {
+    // Travel-advance settlements use a different endpoint + tone
+    if (s.status === 'settlement_pending') return approveSettlementHandler(s);
+
+    const isAdvance = s.form_type === 'met_advance';
     const ok = await confirmModal({
-      title: 'Approve this claim?',
-      body: `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. The final report (with bills merged) will be generated and stored in OneDrive under Reports/.`,
+      title: isAdvance ? 'Approve this advance?' : 'Approve this claim?',
+      body: isAdvance
+        ? `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. The advance will be marked approved and stays OPEN until the employee settles it after the trip.`
+        : `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. The final report (with bills merged) will be generated and stored in OneDrive under Reports/.`,
       confirmText: 'Approve',
     });
     if (!ok) return;
-    showLoading('Approving & generating report…');
+    showLoading(isAdvance ? 'Approving advance…' : 'Approving & generating report…');
     try {
       const res = await api(`/api/admin/submissions/${s.id}/approve`, { method: 'POST', body: JSON.stringify({}) });
-      toast(res.od_synced ? 'Approved · report stored in OneDrive' : 'Approved · OneDrive sync pending (will retry)', res.od_synced ? 'success' : 'warning');
+      if (res.advance_open) {
+        toast('Advance approved · open until settled', 'success');
+      } else {
+        toast(res.od_synced ? 'Approved · report stored in OneDrive' : 'Approved · OneDrive sync pending (will retry)', res.od_synced ? 'success' : 'warning');
+      }
       await Promise.all([loadPending(), loadSubmissions()]);
       drawPendingTable(); drawSubmissionsTable();
     } catch (err) {
@@ -1841,7 +2126,27 @@
     } finally { hideLoading(); }
   }
 
+  async function approveSettlementHandler(s) {
+    const ok = await confirmModal({
+      title: 'Approve this settlement?',
+      body: `${s.employee_name} · ${s.reference}. This closes the advance, generates the final report (advance + actuals + bills), and stores it in OneDrive.`,
+      confirmText: 'Approve Settlement',
+    });
+    if (!ok) return;
+    showLoading('Approving settlement & generating final report…');
+    try {
+      const res = await api(`/api/admin/submissions/${s.id}/approve-settlement`, { method: 'POST', body: JSON.stringify({}) });
+      toast(res.od_synced ? 'Settlement approved · advance closed' : 'Settlement approved · OneDrive sync pending', res.od_synced ? 'success' : 'warning');
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Settlement approval failed', 'error');
+    } finally { hideLoading(); }
+  }
+
   async function rejectSubmission(s) {
+    if (s.status === 'settlement_pending') return rejectSettlementHandler(s);
+
     const note = await promptModal({
       title: 'Reject this claim?',
       body: `${s.employee_name} · ${s.reference}. Optionally add a reason (logged + written to the Excel sheet).`,
@@ -1857,6 +2162,25 @@
       drawPendingTable(); drawSubmissionsTable();
     } catch (err) {
       toast(err.message || 'Rejection failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  async function rejectSettlementHandler(s) {
+    const note = await promptModal({
+      title: 'Reject this settlement?',
+      body: `${s.employee_name} · ${s.reference}. The advance will return to "settlement_rejected" status — the employee can re-file with corrections.`,
+      placeholder: 'Reason (so the employee knows what to fix)',
+      confirmText: 'Reject Settlement',
+    });
+    if (note === null) return;
+    showLoading('Rejecting settlement…');
+    try {
+      await api(`/api/admin/submissions/${s.id}/reject-settlement`, { method: 'POST', body: JSON.stringify({ note }) });
+      toast('Settlement rejected', 'success');
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Settlement rejection failed', 'error');
     } finally { hideLoading(); }
   }
 
@@ -2060,6 +2384,7 @@
   $('#backBtn') && $('#backBtn').addEventListener('click', goBack);
 
   $('#historyRefreshBtn') && $('#historyRefreshBtn').addEventListener('click', renderHistory);
+  $('#openAdvRefreshBtn') && $('#openAdvRefreshBtn').addEventListener('click', renderOpenAdvances);
 
   // Submission viewer modal
   $('#viewClose') && $('#viewClose').addEventListener('click', () => $('#viewBackdrop').classList.remove('show'));

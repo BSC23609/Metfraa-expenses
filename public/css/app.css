@@ -1707,6 +1707,40 @@ body::after {
 .status-pill.pending  { background: rgba(180,83,9,0.12);  color: var(--bsg-warning); }
 .status-pill.approved { background: rgba(5,150,105,0.12);  color: var(--bsg-success); }
 .status-pill.rejected { background: rgba(220,38,38,0.12);  color: var(--bsg-danger); }
+.status-pill.advance_approved    { background: rgba(37,99,235,0.12);  color: var(--bsg-blue); }
+.status-pill.settlement_pending  { background: rgba(180,83,9,0.16);   color: var(--bsg-warning); }
+.status-pill.settled             { background: rgba(5,150,105,0.16);  color: var(--bsg-success); }
+.status-pill.settlement_rejected { background: rgba(220,38,38,0.16);  color: var(--bsg-danger); }
+
+/* ---- Open Advances list / cards -------------------------------- */
+.option-card.advance-card { border-left: 3px solid var(--bsg-blue); }
+.option-card .card-badge {
+  display: inline-block; margin-left: 8px;
+  background: var(--bsg-blue); color: #fff;
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700;
+  vertical-align: 3px;
+}
+.advance-list-card { padding: 18px 22px; }
+.adv-row-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.adv-ref { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--bsg-muted); letter-spacing: 0.04em; }
+.adv-dest { font-weight: 600; font-size: 15px; color: var(--bsg-ink); margin-top: 2px; }
+.adv-dates { font-weight: 400; color: var(--bsg-muted); font-size: 13px; }
+.adv-amt { text-align: right; display: flex; flex-direction: column; align-items: flex-end; }
+.adv-amt-lbl { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--bsg-muted); }
+.adv-amt-val { font-family: 'Oswald', sans-serif; font-size: 18px; color: var(--bsg-blue); font-weight: 600; }
+.adv-purpose { font-size: 13px; color: var(--bsg-ink); margin: 12px 0; padding: 10px 12px; background: var(--bsg-soft, #f6f8fa); border-radius: 3px; }
+.adv-row-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 8px; }
+
+/* ---- Settlement difference banner ------------------------------ */
+.settle-diff {
+  margin-top: 14px; padding: 12px 14px; border-radius: 3px;
+  font-size: 13px; line-height: 1.55;
+}
+.settle-diff:empty { display: none; }
+.settle-diff.balanced  { background: rgba(5,150,105,0.08);  border-left: 3px solid var(--bsg-success); color: var(--bsg-success); }
+.settle-diff.to-return { background: rgba(180,83,9,0.08);   border-left: 3px solid var(--bsg-warning); color: var(--bsg-warning); }
+.settle-diff.to-claim  { background: rgba(37,99,235,0.08);  border-left: 3px solid var(--bsg-blue);    color: var(--bsg-blue); }
 
 .admin-actions button.view:hover     { background: var(--bsg-ink);     color: white; border-color: var(--bsg-ink); }
 .admin-actions button.approve:hover  { background: var(--bsg-success); color: white; border-color: var(--bsg-success); }
@@ -1829,3 +1863,20 @@ body::after {
 }
 .vd-chip-ico { display: inline-flex; width: 13px; height: 13px; }
 .vd-chip-ico svg { width: 13px; height: 13px; }
+
+/* Settlement block inside the popup viewer */
+.vd-settlement {
+  margin: 16px 0; padding: 14px 16px;
+  background: var(--bsg-soft, #f6f8fa); border-radius: 4px;
+  border-left: 3px solid var(--bsg-blue);
+}
+.vd-settlement > .vd-label:first-child {
+  font-size: 11px; margin-bottom: 10px;
+}
+.vd-diff {
+  margin-top: 12px; padding: 9px 12px; border-radius: 3px;
+  font-size: 13px; font-weight: 500;
+}
+.vd-diff.balanced  { background: rgba(5,150,105,0.10);  color: var(--bsg-success); }
+.vd-diff.to-return { background: rgba(180,83,9,0.10);   color: var(--bsg-warning); }
+.vd-diff.to-claim  { background: rgba(37,99,235,0.10);  color: var(--bsg-blue); }

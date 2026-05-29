@@ -221,6 +221,71 @@
   </div>
 </section>
 
+<!-- ============== OPEN TRAVEL ADVANCES ============== -->
+<section class="page" id="page-openAdvances">
+  <div class="container">
+    <div class="form-header">
+      <div>
+        <div class="breadcrumb"><a data-nav="hub">Home</a></div>
+        <h2>Open Travel Advances</h2>
+      </div>
+      <button class="btn btn-ghost" id="openAdvRefreshBtn" title="Refresh">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        Refresh
+      </button>
+    </div>
+    <p style="color:var(--bsg-muted);font-size:13px;margin-bottom:18px;">
+      These advances are approved and disbursed. After your travel, click <strong>Settle</strong> to enter the actual amount spent and attach your bills.
+    </p>
+    <div id="openAdvList"></div>
+  </div>
+</section>
+
+<!-- ============== SETTLE ADVANCE ============== -->
+<section class="page" id="page-settleAdvance">
+  <div class="container">
+    <div class="form-header">
+      <div>
+        <div class="breadcrumb"><a data-nav="openAdvances">Open Advances</a></div>
+        <h2>Settle Travel Advance</h2>
+      </div>
+    </div>
+
+    <div class="card" id="settleAdvanceSummary"></div>
+
+    <div class="card">
+      <div class="card-title">Settlement Details</div>
+      <div class="field-grid">
+        <div class="field">
+          <label for="settleActual">Actual Amount Spent (₹) <span class="req">*</span></label>
+          <input id="settleActual" type="number" step="0.01" min="0" placeholder="0.00" />
+        </div>
+      </div>
+      <div class="field full">
+        <label for="settleNotes">Notes (optional)</label>
+        <textarea id="settleNotes" class="ti" rows="2" placeholder="Any remarks about the trip or expenses…"></textarea>
+      </div>
+      <div id="settleDifference" class="settle-diff"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Bills &amp; Supporting Documents</div>
+      <div class="upload-zone" id="settleUploadZone">
+        <input type="file" id="settleFileInput" multiple accept="image/*,.pdf" />
+        <span class="icon">📎</span>
+        <div class="text">Drop bills here or click to browse</div>
+        <div class="hint">JPG, PNG, WEBP, HEIC, or PDF · up to 10 MB each · at least one bill is required</div>
+      </div>
+      <div class="upload-list" id="settleUploadList"></div>
+    </div>
+
+    <div class="form-actions">
+      <button class="btn btn-ghost" data-nav="openAdvances">Cancel</button>
+      <button class="btn btn-submit" id="settleSubmitBtn">Submit Settlement</button>
+    </div>
+  </div>
+</section>
+
 <!-- ============== ADMIN PANEL ============== -->
 <section class="page" id="page-admin">
   <div class="container">

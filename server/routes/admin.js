@@ -24,8 +24,17 @@ router.get('/submissions', requireAdmin, (req, res) => {
 });
 
 // ---- Pending approvals (convenience) ------------------------------
+//   Returns BOTH new submissions awaiting first approval AND open
+//   Travel Advances awaiting settlement approval. The frontend can
+//   distinguish using the 'status' field on each row.
 router.get('/pending', requireAdmin, (req, res) => {
-  res.json({ submissions: stmts.listSubmissionsByStatus.all('pending') });
+  const pending = stmts.listSubmissionsByStatus.all('pending');
+  const settlementPending = stmts.listSubmissionsByStatus.all('settlement_pending');
+  res.json({
+    submissions: [...pending, ...settlementPending],
+    pending_count: pending.length,
+    settlement_pending_count: settlementPending.length,
+  });
 });
 
 // ---- Approve a submission -----------------------------------------
