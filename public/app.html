@@ -301,7 +301,8 @@
     </div>
 
     <div class="admin-tabs">
-      <button class="admin-tab active" data-tab="pending">
+      <button class="admin-tab active" data-tab="dashboard">Dashboard</button>
+      <button class="admin-tab" data-tab="pending">
         Pending Approvals <span class="tab-badge" id="pendingBadge">0</span>
       </button>
       <button class="admin-tab" data-tab="submissions">All Submissions</button>
@@ -309,8 +310,56 @@
       <button class="admin-tab" data-tab="projects">Projects</button>
     </div>
 
+    <!-- TAB: Dashboard -->
+    <div class="admin-tabpane active" id="tab-dashboard">
+      <div class="dash-toolbar">
+        <div class="dash-range">
+          <label for="dashFrom">From</label>
+          <input type="date" id="dashFrom" />
+          <label for="dashTo">To</label>
+          <input type="date" id="dashTo" />
+          <select id="dashPreset" class="ti" style="max-width:170px;">
+            <option value="this_month">This Month</option>
+            <option value="last_month">Last Month</option>
+            <option value="this_fy" selected>This Financial Year</option>
+            <option value="last_fy">Last Financial Year</option>
+            <option value="ytd">Year to Date (Calendar)</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <label class="dash-toggle" style="margin-left:auto;">
+          <input type="checkbox" id="dashIncludePending" />
+          Include pending / committed
+        </label>
+        <button class="btn btn-ghost" id="dashRefreshBtn" title="Refresh">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+          Refresh
+        </button>
+      </div>
+
+      <div class="dash-tiles" id="dashTiles"></div>
+
+      <div class="dash-charts">
+        <div class="card dash-chart-card">
+          <div class="card-title">Spend by Category</div>
+          <div class="dash-chart-host"><canvas id="dashChartCategory"></canvas></div>
+        </div>
+        <div class="card dash-chart-card">
+          <div class="card-title">Spend by Project</div>
+          <div class="dash-chart-host"><canvas id="dashChartProject"></canvas></div>
+        </div>
+        <div class="card dash-chart-card dash-chart-wide">
+          <div class="card-title">Spend by Employee (top 15)</div>
+          <div class="dash-chart-host" style="height:auto;min-height:380px;"><canvas id="dashChartEmployee"></canvas></div>
+        </div>
+      </div>
+      <div id="dashEmptyMsg" style="display:none;text-align:center;color:var(--bsg-muted);padding:48px;">
+        No data in this range. Try widening the date range, or include pending submissions.
+      </div>
+    </div>
+
     <!-- TAB: Pending Approvals -->
-    <div class="admin-tabpane active" id="tab-pending">
+    <div class="admin-tabpane" id="tab-pending">
       <div class="admin-toolbar">
         <input type="text" id="pendSearch" class="admin-search" placeholder="Search pending by name, reference, form…" />
         <span class="admin-count" id="pendCount"></span>
@@ -522,6 +571,7 @@
   <div class="text" id="loadingText">Working…</div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="/js/policy-renderer.js"></script>
 <script src="/js/app.js"></script>
 </body>

@@ -385,6 +385,201 @@ router.delete('/projects/:id', requireAdmin, (req, res) => {
   res.json({ ok: true, deleted: true });
 });
 
+// ---- Dashboard (spend aggregation) ---------------------------------
+//   GET /api/admin/dashboard?from=YYYY-MM-DD&to=YYYY-MM-DD&include_pending=0|1
+//
+//   Aggregates submission spend by category, project, and employee within
+//   a date range. Three rules baked in:
+//
+//   1. By default, only 'approved' and 'settled' submissions count (true
+//      actual spend). Setting include_pending=1 also includes 'pending',
+//      'advance_approved', and 'settlement_pending' — useful for live
+//      "committed spend" views.
+//
+//   2. Travel advances are special-cased:
+//      - 'settled': counted at the actual amount spent (actuals_json.actual_amount)
+//      - 'advance_approved' / 'settlement_pending': counted at total_amount
+//         BUT only when include_pending=1
+//      - 'pending': counted at total_amount only when include_pending=1
+//
+//   3. Outstation Travel splits its total_amount across its sub-categories
+//      (travel / accommodation / food / local_conveyance / others) using
+//      the payload. Other forms map 1:1 to a category bucket.
+router.get('/dashboard', requireAdmin, (req, res) => {
+  try {
+    const from = (req.query.from || '').slice(0, 10);
+    const to   = (req.query.to   || '').slice(0, 10);
+    const includePending = req.query.include_pending === '1' || req.query.include_pending === 'true';
+
+    // Status filter: approved/settled are always in; pending family only when requested
+    const statuses = includePending
+      ? ['approved', 'settled', 'pending', 'advance_approved', 'settlement_pending']
+      : ['approved', 'settled'];
+    const placeholders = statuses.map(() => '?').join(',');
+
+    // Date filter on submitted_at; both bounds optional
+    const conds = [`status IN (${placeholders})`];
+    const params = [...statuses];
+    if (from) { conds.push(`DATE(submitted_at) >= ?`); params.push(from); }
+    if (to)   { conds.push(`DATE(submitted_at) <= ?`); params.push(to); }
+    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+
+    const rows = db.prepare(`
+      SELECT s.id, s.form_type, s.status, s.total_amount, s.payload_json, s.actuals_json,
+             s.project_id, s.purpose_category, s.client_name, s.submitted_at,
+             e.id AS employee_id, e.name AS employee_name
+      FROM submissions s
+      LEFT JOIN employees e ON e.id = s.employee_id
+      ${where}
+      ORDER BY s.id DESC
+    `).all(...params);
+
+    // -- Aggregation buckets --
+    const byCategory = {};   // 'Own Travel' → 12345
+    const byProject  = {};   // projectId → { name, total }
+    const byEmployee = {};   // empId → { name, total }
+    const byStatus   = {};   // status → count
+    let totalSpend = 0;
+    let totalSubmissions = 0;
+    const openAdvances = { count: 0, total_requested: 0 };
+
+    // Category labels — what's shown on the chart
+    const CAT_LABEL = {
+      own_travel:   'Own Travel',
+      cab:          'Cab Travel',
+      accommodation:'Accommodation',
+      food:         'Food',
+      local_conv:   'Local Conveyance',
+      out_travel:   'Outstation Travel',
+      out_others:   'Outstation Others',
+      misc:         'Miscellaneous',
+      advance:      'Travel Advances',
+    };
+    const addCat = (key, amt) => { if (!(amt > 0)) return; const lbl = CAT_LABEL[key] || key; byCategory[lbl] = (byCategory[lbl] || 0) + amt; };
+
+    // Project name lookup (we need names for the chart labels)
+    const projectMap = new Map();
+    for (const p of stmts.listProjectsAll.all()) {
+      projectMap.set(p.id, p);
+    }
+
+    for (const r of rows) {
+      byStatus[r.status] = (byStatus[r.status] || 0) + 1;
+
+      // What amount counts as "spent" for THIS row?
+      let amount = 0;
+      if (r.form_type === 'met_advance') {
+        if (r.status === 'settled') {
+          // Use actual settlement amount (could be more or less than requested)
+          try {
+            const a = JSON.parse(r.actuals_json || '{}');
+            amount = parseFloat(a.actual_amount) || 0;
+          } catch (_) { amount = 0; }
+        } else if (r.status === 'pending') {
+          // Unsettled — count as committed only if include_pending
+          amount = includePending ? (r.total_amount || 0) : 0;
+          if (!includePending) {
+            // Still surface it as an "open advance" tile (separate from spend)
+            openAdvances.count++;
+            openAdvances.total_requested += (r.total_amount || 0);
+          }
+        } else if (r.status === 'advance_approved' || r.status === 'settlement_pending') {
+          openAdvances.count++;
+          openAdvances.total_requested += (r.total_amount || 0);
+          amount = includePending ? (r.total_amount || 0) : 0;
+        }
+      } else {
+        amount = r.total_amount || 0;
+      }
+
+      if (amount <= 0) continue;
+      totalSpend += amount;
+      totalSubmissions++;
+
+      // --- Category attribution ---
+      if (r.form_type === 'met_local' || r.form_type === 'bsc_conveyance') {
+        addCat('own_travel', amount);
+      } else if (r.form_type === 'met_cab') {
+        addCat('cab', amount);
+      } else if (r.form_type === 'met_accommodation') {
+        addCat('accommodation', amount);
+      } else if (r.form_type === 'met_misc') {
+        addCat('misc', amount);
+      } else if (r.form_type === 'met_advance') {
+        addCat('advance', amount);
+      } else if (r.form_type === 'met_outstation' || r.form_type === 'bsc_expense') {
+        // Walk the payload's trips and split by category
+        try {
+          const payload = JSON.parse(r.payload_json || '{}');
+          for (const trip of (payload.trips || [])) {
+            const cats = trip.categories || {};
+            for (const [catKey, items] of Object.entries(cats)) {
+              const sum = (items || []).reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
+              if (sum <= 0) continue;
+              if (catKey === 'travel') addCat('out_travel', sum);
+              else if (catKey === 'accommodation') addCat('accommodation', sum);
+              else if (catKey === 'food') addCat('food', sum);
+              else if (catKey === 'local_conveyance' || catKey === 'conveyance') addCat('local_conv', sum);
+              else addCat('out_others', sum);
+            }
+          }
+        } catch (_) {
+          // Fallback: bucket the whole amount as outstation if payload is malformed
+          addCat('out_travel', amount);
+        }
+      } else {
+        addCat('misc', amount);
+      }
+
+      // --- Project attribution ---
+      if (r.project_id) {
+        const p = projectMap.get(r.project_id);
+        const name = p ? (p.code && p.code !== p.name ? `${p.name} (${p.code})` : p.name) : `Project #${r.project_id}`;
+        const cur = byProject[r.project_id] || { name, total: 0 };
+        cur.total += amount;
+        byProject[r.project_id] = cur;
+      } else if (r.client_name) {
+        const key = 'prospect:' + r.client_name.toLowerCase();
+        const cur = byProject[key] || { name: r.client_name + ' (Prospect)', total: 0 };
+        cur.total += amount;
+        byProject[key] = cur;
+      } else {
+        const cur = byProject['_unspecified'] || { name: 'No Project', total: 0 };
+        cur.total += amount;
+        byProject['_unspecified'] = cur;
+      }
+
+      // --- Employee attribution ---
+      if (r.employee_id) {
+        const cur = byEmployee[r.employee_id] || { name: r.employee_name || `#${r.employee_id}`, total: 0 };
+        cur.total += amount;
+        byEmployee[r.employee_id] = cur;
+      }
+    }
+
+    res.json({
+      filters: { from, to, include_pending: includePending },
+      summary: {
+        total_spend: +totalSpend.toFixed(2),
+        total_submissions: totalSubmissions,
+        active_employees: Object.keys(byEmployee).length,
+        active_projects: Object.keys(byProject).filter(k => k !== '_unspecified' && !k.startsWith('prospect:')).length,
+        open_advances: openAdvances,
+      },
+      by_category: Object.entries(byCategory).map(([label, total]) => ({ label, total: +total.toFixed(2) }))
+        .sort((a, b) => b.total - a.total),
+      by_project:  Object.values(byProject).map(p => ({ name: p.name, total: +p.total.toFixed(2) }))
+        .sort((a, b) => b.total - a.total),
+      by_employee: Object.values(byEmployee).map(e => ({ name: e.name, total: +e.total.toFixed(2) }))
+        .sort((a, b) => b.total - a.total),
+      by_status: byStatus,
+    });
+  } catch (err) {
+    console.error('[dashboard]', err);
+    res.status(500).json({ error: err.message || 'Dashboard failed' });
+  }
+});
+
 // ---- Audit log -----------------------------------------------------
 router.get('/audit', requireAdmin, (req, res) => {
   res.json({ audit: db.prepare(`SELECT * FROM audit_log ORDER BY id DESC LIMIT 500`).all() });

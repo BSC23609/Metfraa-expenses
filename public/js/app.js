@@ -1023,35 +1023,51 @@
       + '<option value="sales_visit">Sales Visit</option>';
     purposeSel.value = fd.purpose_category || '';
     purposeSel.onchange = (e) => {
+      // Clear any stale project / client picks when switching purpose —
+      // avoids carrying over a Project selection into a Sales Visit etc.
+      const prev = fd.purpose_category;
       fd.purpose_category = e.target.value;
-      // Re-render this card only (to swap project<->client widgets for Sales Visit)
+      if (prev !== e.target.value) {
+        fd.project_id = '';
+        fd.client_name = '';
+      }
+      // Re-render this card to reveal / hide the Project & Client fields.
       const newCard = buildPurposeProjectCard();
       card.replaceWith(newCard);
     };
     purposeField.appendChild(purposeSel);
     grid.appendChild(purposeField);
 
-    // Project dropdown / Client name (Sales Visit can use either)
+    const hasPurpose = !!fd.purpose_category;
     const isSales = fd.purpose_category === 'sales_visit';
-    const projField = el('div', { class: 'field' },
-      el('label', { for: 'ppProjectSel' }, 'Project ', isSales ? null : el('span', { class: 'req' }, '*'))
-    );
-    const projectSel = el('select', { id: 'ppProjectSel' });
-    populateProjectOptions(projectSel);
-    projectSel.value = fd.project_id || '';
-    projectSel.onchange = (e) => {
-      fd.project_id = e.target.value;
-      // If a project is selected, clear any prospect client_name
-      if (e.target.value) fd.client_name = '';
-    };
-    projField.appendChild(projectSel);
-    grid.appendChild(projField);
+
+    // Project dropdown — only show once purpose has been picked.
+    if (hasPurpose) {
+      const projLabelText = isSales ? 'Project (optional for Sales Visit)' : 'Project';
+      const projField = el('div', { class: 'field' },
+        el('label', { for: 'ppProjectSel' }, projLabelText, ' ', isSales ? null : el('span', { class: 'req' }, '*'))
+      );
+      const projectSel = el('select', { id: 'ppProjectSel' });
+      populateProjectOptions(projectSel);
+      projectSel.value = fd.project_id || '';
+      projectSel.onchange = (e) => {
+        fd.project_id = e.target.value;
+        if (e.target.value) fd.client_name = '';
+      };
+      projField.appendChild(projectSel);
+      grid.appendChild(projField);
+    }
 
     card.appendChild(grid);
 
-    // For Sales Visit, also offer a Client / Prospect Name input as an
-    // alternative to picking a project from the list.
-    if (isSales) {
+    if (!hasPurpose) {
+      // Helpful prompt while waiting for the purpose pick
+      card.appendChild(el('div', {
+        style: 'margin-top:10px;padding:10px 12px;background:#f6f8fa;border-radius:3px;font-size:12px;color:var(--bsg-muted);'
+      }, 'Select a purpose above to choose the project.'));
+    } else if (isSales) {
+      // For Sales Visit, also offer a Client / Prospect Name input as an
+      // alternative to picking a project from the list.
       const clientField = el('div', { class: 'field full', style: 'margin-top:14px;' },
         el('label', { for: 'ppClientName' }, 'Client / Prospect Name'),
         el('div', { style: 'font-size:11px;color:var(--bsg-muted);margin-bottom:6px;' },
@@ -1062,7 +1078,6 @@
       clientInput.value = fd.client_name || '';
       clientInput.oninput = (e) => {
         fd.client_name = e.target.value;
-        // If they're typing a prospect, clear any picked project
         if (e.target.value && fd.project_id) {
           fd.project_id = '';
           const sel = $('#ppProjectSel');
@@ -2158,7 +2173,7 @@
   // ===================================================================
   const LEVEL_LABEL = { L1: 'Junior', L2: 'Senior', L3: 'Managerial' };
 
-  let adminTab = 'pending';
+  let adminTab = 'dashboard';
 
   async function renderAdmin() {
     if (!state.isAdmin) { toast('Admin access required', 'error'); route('hub'); return; }
@@ -2174,6 +2189,7 @@
     $$('.admin-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     $$('.admin-tabpane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
     if (tab === 'projects') loadProjectsAdmin().then(drawProjectTable);
+    if (tab === 'dashboard') loadDashboard();
   }
 
   // ---- Pending approvals --------------------------------------------
@@ -2600,6 +2616,161 @@
     } catch (err) { toast(err.message || 'Reactivate failed', 'error'); }
   }
 
+  // ---- Dashboard (admin) --------------------------------------------
+  //   Fetches aggregated spend from /api/admin/dashboard and renders
+  //   summary tiles + three Chart.js charts. Charts are recreated on each
+  //   refresh (destroyed first so canvases don't accumulate).
+  const dashCharts = { category: null, project: null, employee: null };
+
+  function dashRangeFromPreset(preset) {
+    const today = new Date();
+    const y = today.getFullYear(), m = today.getMonth(); // 0-11
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const lastDay = (yr, mo) => new Date(yr, mo + 1, 0); // mo is 0-11; last day of that month
+    switch (preset) {
+      case 'this_month':
+        return { from: iso(new Date(y, m, 1)), to: iso(lastDay(y, m)) };
+      case 'last_month': {
+        const lmY = m === 0 ? y - 1 : y;
+        const lmM = m === 0 ? 11 : m - 1;
+        return { from: iso(new Date(lmY, lmM, 1)), to: iso(lastDay(lmY, lmM)) };
+      }
+      case 'this_fy': {
+        // Apr 1 of this FY (which starts in Apr of either this or last calendar year)
+        const fyStartY = m >= 3 ? y : y - 1;
+        return { from: iso(new Date(fyStartY, 3, 1)), to: iso(new Date(fyStartY + 1, 2, 31)) };
+      }
+      case 'last_fy': {
+        const fyStartY = (m >= 3 ? y : y - 1) - 1;
+        return { from: iso(new Date(fyStartY, 3, 1)), to: iso(new Date(fyStartY + 1, 2, 31)) };
+      }
+      case 'ytd':
+        return { from: iso(new Date(y, 0, 1)), to: iso(today) };
+      default:
+        return null; // custom — leave as-is
+    }
+  }
+
+  async function loadDashboard() {
+    // Compute date range from preset (if not custom)
+    const preset = $('#dashPreset').value;
+    const range = dashRangeFromPreset(preset);
+    if (range) {
+      $('#dashFrom').value = range.from;
+      $('#dashTo').value   = range.to;
+    }
+    const from = $('#dashFrom').value;
+    const to   = $('#dashTo').value;
+    const includePending = $('#dashIncludePending').checked ? '1' : '0';
+
+    const tiles = $('#dashTiles');
+    tiles.innerHTML = '<div style="padding:30px;text-align:center;color:var(--bsg-muted);">Loading…</div>';
+
+    try {
+      const params = new URLSearchParams();
+      if (from) params.set('from', from);
+      if (to)   params.set('to', to);
+      params.set('include_pending', includePending);
+      const data = await api('/api/admin/dashboard?' + params.toString());
+      renderDashboard(data);
+    } catch (err) {
+      tiles.innerHTML = `<div style="color:var(--bsg-danger);padding:24px;">${err.message || 'Failed to load dashboard'}</div>`;
+    }
+  }
+
+  function renderDashboard(d) {
+    // Tiles
+    const s = d.summary || {};
+    const fmtINR = (n) => '₹ ' + fmt(n || 0);
+    const tiles = $('#dashTiles');
+    tiles.innerHTML = '';
+    const tile = (label, value, subtle) => el('div', { class: 'dash-tile' },
+      el('div', { class: 'dash-tile-lbl' }, label),
+      el('div', { class: 'dash-tile-val' }, value),
+      subtle ? el('div', { class: 'dash-tile-sub' }, subtle) : null
+    );
+    tiles.appendChild(tile('Total Spend', fmtINR(s.total_spend)));
+    tiles.appendChild(tile('Submissions', String(s.total_submissions || 0)));
+    tiles.appendChild(tile('Employees', String(s.active_employees || 0)));
+    tiles.appendChild(tile('Projects', String(s.active_projects || 0)));
+    if (s.open_advances && s.open_advances.count > 0) {
+      tiles.appendChild(tile(
+        'Open Advances',
+        String(s.open_advances.count),
+        fmtINR(s.open_advances.total_requested) + ' committed'
+      ));
+    }
+
+    // Empty-state
+    const hasData = (d.by_category && d.by_category.length) || (d.by_project && d.by_project.length) || (d.by_employee && d.by_employee.length);
+    $('#dashEmptyMsg').style.display = hasData ? 'none' : '';
+    document.querySelector('.dash-charts').style.display = hasData ? '' : 'none';
+    if (!hasData) return;
+
+    // Charts — destroy any previous instances first
+    for (const k of Object.keys(dashCharts)) {
+      if (dashCharts[k]) { dashCharts[k].destroy(); dashCharts[k] = null; }
+    }
+    if (typeof Chart === 'undefined') {
+      $('#dashEmptyMsg').textContent = 'Chart library failed to load. Check your network.';
+      $('#dashEmptyMsg').style.display = '';
+      document.querySelector('.dash-charts').style.display = 'none';
+      return;
+    }
+
+    // Colour palette (cyclable)
+    const palette = ['#2563eb', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#a855f7', '#f97316', '#06b6d4', '#84cc16'];
+    const pickColors = (n) => Array.from({ length: n }, (_, i) => palette[i % palette.length]);
+
+    // -- Category chart (vertical bar)
+    const cat = d.by_category || [];
+    dashCharts.category = new Chart($('#dashChartCategory'), {
+      type: 'bar',
+      data: {
+        labels: cat.map(c => c.label),
+        datasets: [{ label: 'Spend (₹)', data: cat.map(c => c.total), backgroundColor: pickColors(cat.length), borderWidth: 0 }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => '₹ ' + fmt(ctx.parsed.y) } } },
+        scales: { y: { beginAtZero: true, ticks: { callback: (v) => '₹' + fmt(v) } } },
+      },
+    });
+
+    // -- Project chart (donut)
+    const proj = (d.by_project || []).slice(0, 12);
+    dashCharts.project = new Chart($('#dashChartProject'), {
+      type: 'doughnut',
+      data: {
+        labels: proj.map(p => p.name),
+        datasets: [{ data: proj.map(p => p.total), backgroundColor: pickColors(proj.length), borderWidth: 1, borderColor: '#fff' }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ₹ ${fmt(ctx.parsed)}` } },
+        },
+        cutout: '55%',
+      },
+    });
+
+    // -- Employee chart (horizontal bar, top 15)
+    const emp = (d.by_employee || []).slice(0, 15);
+    dashCharts.employee = new Chart($('#dashChartEmployee'), {
+      type: 'bar',
+      data: {
+        labels: emp.map(e => e.name),
+        datasets: [{ label: 'Spend (₹)', data: emp.map(e => e.total), backgroundColor: '#2563eb', borderWidth: 0 }],
+      },
+      options: {
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => '₹ ' + fmt(ctx.parsed.x) } } },
+        scales: { x: { beginAtZero: true, ticks: { callback: (v) => '₹' + fmt(v) } } },
+      },
+    });
+  }
+
   async function deactivateEmployee(emp) {
     const ok = await confirmModal({
       title: 'Deactivate employee?',
@@ -2671,6 +2842,13 @@
   $('#projModalCancel') && $('#projModalCancel').addEventListener('click', closeProjectModal);
   $('#projModalSave')   && $('#projModalSave').addEventListener('click', saveProject);
   $('#projModalBackdrop') && $('#projModalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'projModalBackdrop') closeProjectModal(); });
+
+  // Dashboard
+  $('#dashRefreshBtn')      && $('#dashRefreshBtn').addEventListener('click', loadDashboard);
+  $('#dashPreset')          && $('#dashPreset').addEventListener('change', loadDashboard);
+  $('#dashIncludePending')  && $('#dashIncludePending').addEventListener('change', loadDashboard);
+  $('#dashFrom')            && $('#dashFrom').addEventListener('change', () => { $('#dashPreset').value = 'custom'; loadDashboard(); });
+  $('#dashTo')              && $('#dashTo').addEventListener('change', () => { $('#dashPreset').value = 'custom'; loadDashboard(); });
   $('#empSearch') && $('#empSearch').addEventListener('input', drawEmployeeTable);
   $('#showInactive') && $('#showInactive').addEventListener('change', async () => { await loadEmployees(); drawEmployeeTable(); });
   $('#empModalBackdrop') && $('#empModalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'empModalBackdrop') closeEmployeeModal(); });
