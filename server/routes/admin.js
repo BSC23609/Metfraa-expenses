@@ -304,6 +304,87 @@ router.delete('/employees/:id', requireAdmin, (req, res) => {
   res.json({ ok: true, submissions_retained: subCount });
 });
 
+// ---- Projects (admin-managed list referenced by submissions) -------
+//   Drives the "Project" dropdown on every form.
+//   Soft-delete (deactivate) when a project has submissions referencing
+//   it; hard-delete only if it's never been used.
+router.get('/projects', requireAdmin, (req, res) => {
+  res.json({ projects: stmts.listProjectsAll.all() });
+});
+
+router.post('/projects', requireAdmin, (req, res) => {
+  const { code, name } = req.body || {};
+  const trimmedName = (name || '').trim();
+  if (!trimmedName) return res.status(400).json({ error: 'Project name is required.' });
+  if (trimmedName.length > 100) return res.status(400).json({ error: 'Project name is too long (max 100 chars).' });
+
+  // De-dup on name (case-insensitive). If a row exists, reactivate it.
+  const existing = stmts.findProjectByName.get(trimmedName);
+  if (existing) {
+    const full = stmts.getProject.get(existing.id);
+    stmts.updateProject.run({ id: existing.id, code: (code || full.code || '').trim() || null, name: trimmedName, is_active: 1 });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'PROJECT_REACTIVATE',
+      target_type: 'project', target_id: existing.id,
+      meta_json: JSON.stringify({ name: trimmedName }), ip_address: req.ip,
+    });
+    return res.json({ ok: true, project: stmts.getProject.get(existing.id), reactivated: true });
+  }
+
+  const result = stmts.insertProject.run({ code: (code || '').trim() || null, name: trimmedName, is_active: 1 });
+  stmts.insertAudit.run({
+    actor_email: req.user.email, action: 'PROJECT_CREATE',
+    target_type: 'project', target_id: result.lastInsertRowid,
+    meta_json: JSON.stringify({ name: trimmedName }), ip_address: req.ip,
+  });
+  res.json({ ok: true, project: stmts.getProject.get(result.lastInsertRowid) });
+});
+
+router.put('/projects/:id', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const current = stmts.getProject.get(id);
+  if (!current) return res.status(404).json({ error: 'Project not found.' });
+  const { code, name, is_active } = req.body || {};
+  const trimmedName = (name != null ? String(name) : current.name).trim();
+  if (!trimmedName) return res.status(400).json({ error: 'Project name is required.' });
+  stmts.updateProject.run({
+    id,
+    code: code != null ? (String(code).trim() || null) : current.code,
+    name: trimmedName,
+    is_active: is_active != null ? (is_active ? 1 : 0) : current.is_active,
+  });
+  stmts.insertAudit.run({
+    actor_email: req.user.email, action: 'PROJECT_UPDATE',
+    target_type: 'project', target_id: id,
+    meta_json: JSON.stringify({ name: trimmedName }), ip_address: req.ip,
+  });
+  res.json({ ok: true, project: stmts.getProject.get(id) });
+});
+
+router.delete('/projects/:id', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const current = stmts.getProject.get(id);
+  if (!current) return res.status(404).json({ error: 'Project not found.' });
+  const usageCount = stmts.projectUsageCount.get(id).n;
+  if (usageCount > 0) {
+    // Has historical submissions — deactivate instead of hard-deleting
+    stmts.deactivateProject.run(id);
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'PROJECT_DEACTIVATE',
+      target_type: 'project', target_id: id,
+      meta_json: JSON.stringify({ name: current.name, used_in_submissions: usageCount }), ip_address: req.ip,
+    });
+    return res.json({ ok: true, deactivated: true, submissions_retained: usageCount });
+  }
+  stmts.deleteProject.run(id);
+  stmts.insertAudit.run({
+    actor_email: req.user.email, action: 'PROJECT_DELETE',
+    target_type: 'project', target_id: id,
+    meta_json: JSON.stringify({ name: current.name }), ip_address: req.ip,
+  });
+  res.json({ ok: true, deleted: true });
+});
+
 // ---- Audit log -----------------------------------------------------
 router.get('/audit', requireAdmin, (req, res) => {
   res.json({ audit: db.prepare(`SELECT * FROM audit_log ORDER BY id DESC LIMIT 500`).all() });

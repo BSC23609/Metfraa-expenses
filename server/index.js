@@ -55,6 +55,7 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 app.use('/auth',             require('./routes/auth'));
 app.use('/api/uploads',      require('./routes/uploads'));
 app.use('/api/submissions',  require('./routes/submissions'));
+app.use('/api/projects',     require('./routes/projects'));
 app.use('/api/policy',       require('./routes/policy'));
 app.use('/api/admin',        require('./routes/admin'));
 

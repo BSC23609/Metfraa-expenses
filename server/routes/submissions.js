@@ -60,6 +60,23 @@ router.post('/', requireAuth, async (req, res) => {
     // 3) Persist the submission + attachments (atomic)
     const reference = generateRef(meta.company, form_type);
     const period = (v.payload && v.payload.period) || null;
+
+    // Categorization (purpose + project). The validator strips these from
+    // the payload and surfaces them on v.meta so they live in their own
+    // first-class columns (for dashboards / filtering) rather than buried
+    // inside the JSON payload.
+    const purposeCategory = v.meta && v.meta.purpose_category ? v.meta.purpose_category : null;
+    let projectId   = v.meta && v.meta.project_id != null ? v.meta.project_id : null;
+    const clientName  = v.meta && v.meta.client_name ? v.meta.client_name : null;
+    // Validate the project_id exists + is active (defence in depth — the
+    // frontend already filters to active ones, but the API must not trust it).
+    if (projectId != null) {
+      const proj = stmts.getProject.get(projectId);
+      if (!proj || !proj.is_active) {
+        return res.status(400).json({ error: 'Selected project is not valid. Please pick from the active list.' });
+      }
+    }
+
     const submission = {
       reference,
       employee_id: req.user.id,
@@ -69,6 +86,9 @@ router.post('/', requireAuth, async (req, res) => {
       payload_json: JSON.stringify(v.payload),
       total_amount: v.total,
       pdf_path: null,
+      purpose_category: purposeCategory,
+      project_id: projectId,
+      client_name: clientName,
     };
     const submissionId = createSubmissionTx(submission, attachments);
 
@@ -281,12 +301,18 @@ router.get('/:id', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   const attachments = stmts.listAttachments.all(sub.id);
+  // Look up the linked project (if any) for friendly display
+  const project = sub.project_id ? stmts.getProject.get(sub.project_id) : null;
   res.json({
     submission: {
       id: sub.id, reference: sub.reference, company: sub.company,
       form_type: sub.form_type, period: sub.period, total_amount: sub.total_amount,
       status: sub.status, submitted_at: sub.submitted_at, email_sent_at: sub.email_sent_at,
       reviewed_by: sub.reviewed_by, reviewed_at: sub.reviewed_at, review_note: sub.review_note,
+      // Categorization
+      purpose_category: sub.purpose_category,
+      project: project ? { id: project.id, code: project.code, name: project.name } : null,
+      client_name: sub.client_name,
       // Travel-advance settlement fields (null for non-advance submissions)
       actuals: sub.actuals_json ? JSON.parse(sub.actuals_json) : null,
       settled_at: sub.settled_at,

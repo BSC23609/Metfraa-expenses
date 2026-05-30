@@ -124,6 +124,18 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_audit_actor  ON audit_log(actor_email);
   CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+
+  -- Projects (sites / clients) referenced from submissions.
+  -- Managed by admin via the Projects tab; employees pick from active ones.
+  CREATE TABLE IF NOT EXISTS projects (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT,                              -- short tag, e.g. 'AMNS'
+    name        TEXT NOT NULL,                     -- display name
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_projects_active ON projects(is_active);
 `);
 
 // --------------------------------------------------------------------
@@ -154,6 +166,10 @@ db.exec(`
   add('settlement_reviewed_by',  `settlement_reviewed_by TEXT`);
   add('settlement_reviewed_at',  `settlement_reviewed_at TEXT`);
   add('settlement_note',         `settlement_note TEXT`);
+  // Categorization columns for the dashboard (purpose + project link).
+  add('purpose_category',        `purpose_category TEXT`);   // 'project_visit' | 'site_visit' | 'sales_visit'
+  add('project_id',              `project_id INTEGER`);      // FK to projects.id, nullable for Sales Visits with no project
+  add('client_name',             `client_name TEXT`);        // free-text alternative when no project (sales prospect)
   // Normalise any legacy 'submitted' status to 'pending'
   db.exec(`UPDATE submissions SET status='pending' WHERE status='submitted'`);
 
@@ -163,6 +179,21 @@ db.exec(`
   eadd('auth_method',    `auth_method TEXT NOT NULL DEFAULT 'microsoft'`);
   eadd('password_hash',  `password_hash TEXT`);
   eadd('must_change_pw', `must_change_pw INTEGER NOT NULL DEFAULT 0`);
+
+  // Seed starter projects if the table is empty. Once admin starts managing
+  // them this block does nothing (we only seed when count is zero, not when
+  // a specific code is missing — so the admin can delete defaults safely).
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM projects`).get();
+  const projectCount = row && typeof row.n === 'number' ? row.n : 0;
+  if (projectCount === 0) {
+    const seed = db.prepare(`INSERT INTO projects (code, name) VALUES (?, ?)`);
+    [
+      ['AMNS',     'AMNS'],
+      ['KGISL',    'KGISL'],
+      ['Patanjali','Patanjali'],
+      ['Apollo',   'Apollo Tyres'],
+    ].forEach(([c, n]) => seed.run(c, n));
+  }
 })();
 
 // ====================================================================
@@ -195,8 +226,10 @@ const stmts = {
   countEmployeeSubmissions: db.prepare(`SELECT COUNT(*) AS n FROM submissions WHERE employee_id = ?`),
 
   createSubmission: db.prepare(`
-    INSERT INTO submissions (reference, employee_id, company, form_type, period, payload_json, total_amount, pdf_path)
-    VALUES (@reference, @employee_id, @company, @form_type, @period, @payload_json, @total_amount, @pdf_path)
+    INSERT INTO submissions (reference, employee_id, company, form_type, period, payload_json, total_amount, pdf_path,
+                             purpose_category, project_id, client_name)
+    VALUES (@reference, @employee_id, @company, @form_type, @period, @payload_json, @total_amount, @pdf_path,
+            @purpose_category, @project_id, @client_name)
   `),
   updateSubmissionPdf: db.prepare(`UPDATE submissions SET pdf_path = ? WHERE id = ?`),
   markEmailSent: db.prepare(`UPDATE submissions SET email_sent_at = datetime('now'), email_error = NULL WHERE id = ?`),
@@ -305,6 +338,19 @@ const stmts = {
     INSERT INTO audit_log (actor_email, action, target_type, target_id, meta_json, ip_address)
     VALUES (@actor_email, @action, @target_type, @target_id, @meta_json, @ip_address)
   `),
+
+  // ---- Projects (admin-managed list referenced by submissions) ------
+  listProjectsActive: db.prepare(`SELECT id, code, name FROM projects WHERE is_active = 1 ORDER BY name COLLATE NOCASE`),
+  listProjectsAll:    db.prepare(`SELECT id, code, name, is_active, created_at, updated_at FROM projects ORDER BY is_active DESC, name COLLATE NOCASE`),
+  getProject:         db.prepare(`SELECT id, code, name, is_active FROM projects WHERE id = ?`),
+  findProjectByName:  db.prepare(`SELECT id FROM projects WHERE name = ? COLLATE NOCASE LIMIT 1`),
+  insertProject:      db.prepare(`INSERT INTO projects (code, name, is_active) VALUES (@code, @name, @is_active)`),
+  updateProject:      db.prepare(`UPDATE projects SET code=@code, name=@name, is_active=@is_active, updated_at=datetime('now') WHERE id=@id`),
+  deactivateProject:  db.prepare(`UPDATE projects SET is_active=0, updated_at=datetime('now') WHERE id=?`),
+  // True delete only allowed if no submission references it; the admin
+  // route checks this and falls back to deactivation otherwise.
+  deleteProject:      db.prepare(`DELETE FROM projects WHERE id = ?`),
+  projectUsageCount:  db.prepare(`SELECT COUNT(*) AS n FROM submissions WHERE project_id = ?`),
 };
 
 // Wrap as a transactional helper for submission creation

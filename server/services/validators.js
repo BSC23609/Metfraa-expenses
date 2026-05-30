@@ -324,6 +324,9 @@ const FORM_META = {
   met_advance:       { company: 'metfraa', title: 'Travel Advance Request',           subtitle: 'Metfraa / ADV',  policyForm: 'advance' },
 };
 
+// Valid purpose categories — fixed list as agreed with the customer
+const PURPOSE_CATEGORIES = ['project_visit', 'site_visit', 'sales_visit'];
+
 function validate(formType, input, employee) {
   const v = VALIDATORS[formType];
   if (!v) return err('Unknown form type');
@@ -333,7 +336,62 @@ function validate(formType, input, employee) {
   if (meta.company !== employee.company) {
     return err(`This form is not available to employees of ${employee.company.toUpperCase()}.`);
   }
-  return v(input, employee);
+
+  // --- Pull out + validate categorization (purpose + project) ---
+  // These fields live on the top-level payload (sent by the client) and
+  // are stored in their own DB columns. We strip them from the payload
+  // before form-specific validation so each renderer doesn't have to
+  // worry about them.
+  const purpose = (input && typeof input.purpose_category === 'string') ? input.purpose_category.trim() : '';
+  if (!purpose)                                return err('Purpose is required. Please pick Project Visit, Site Visit, or Sales Visit.');
+  if (!PURPOSE_CATEGORIES.includes(purpose))   return err('Invalid purpose selection.');
+
+  // project_id: required for project_visit / site_visit; optional for sales_visit
+  // (sales visits may be to a prospect — use client_name instead).
+  let projectId = null;
+  let clientName = null;
+  const rawProjectId = input && input.project_id;
+  const rawClient    = input && typeof input.client_name === 'string' ? input.client_name.trim() : '';
+
+  if (purpose === 'sales_visit') {
+    // Need EITHER a project OR a client name
+    if (rawProjectId != null && rawProjectId !== '') {
+      const n = parseInt(rawProjectId, 10);
+      if (!Number.isFinite(n) || n <= 0) return err('Invalid project selection.');
+      projectId = n;
+    } else if (rawClient) {
+      clientName = rawClient.slice(0, 200);
+    } else {
+      return err('For a Sales Visit, pick a project or enter the client / prospect name.');
+    }
+  } else {
+    // Project or Site Visit — project is REQUIRED
+    if (rawProjectId == null || rawProjectId === '') {
+      return err('Please select a Project for this visit.');
+    }
+    const n = parseInt(rawProjectId, 10);
+    if (!Number.isFinite(n) || n <= 0) return err('Invalid project selection.');
+    projectId = n;
+  }
+
+  // Hand off to the form-specific validator with a CLEAN payload
+  // (categorization removed; renderers don't need to see it).
+  const cleanInput = { ...input };
+  delete cleanInput.purpose_category;
+  delete cleanInput.project_id;
+  delete cleanInput.client_name;
+
+  const result = v(cleanInput, employee);
+  if (!result.ok) return result;
+
+  // Attach categorization to result.meta — the submit route reads these
+  // and puts them in the dedicated DB columns.
+  result.meta = {
+    purpose_category: purpose,
+    project_id: projectId,
+    client_name: clientName,
+  };
+  return result;
 }
 
-module.exports = { validate, FORM_META, VALIDATORS };
+module.exports = { validate, FORM_META, VALIDATORS, PURPOSE_CATEGORIES };

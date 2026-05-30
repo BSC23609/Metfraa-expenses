@@ -182,6 +182,37 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
       });
       doc.y = infoY + infoH + 20;
 
+      // -- Purpose & Project strip (categorization for the dashboard) ----
+      // Drawn for any submission that has it set (i.e. anything filed
+      // after the categorization feature went live). Older submissions
+      // simply skip this block.
+      if (submission.purpose_category || submission.project || submission.client_name) {
+        const PURPOSE_NAMES = {
+          project_visit: 'Project Visit',
+          site_visit:    'Site Visit',
+          sales_visit:   'Sales Visit',
+        };
+        const purposeText = PURPOSE_NAMES[submission.purpose_category] || '—';
+        const projectText = submission.project
+          ? (submission.project.name + (submission.project.code && submission.project.code !== submission.project.name ? ` (${submission.project.code})` : ''))
+          : (submission.client_name ? `${submission.client_name} (Prospect)` : '—');
+
+        const stripY = doc.y;
+        const stripH = 36;
+        doc.rect(50, stripY, doc.page.width - 100, stripH).fillColor('#eef2ff').fill();
+        doc.fillColor(INK);
+        const halfW = (doc.page.width - 100) / 2;
+        doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
+           .text('PURPOSE', 50 + 10, stripY + 6, { characterSpacing: 1.3 });
+        doc.fontSize(11).fillColor(INK).font('Helvetica-Bold')
+           .text(purposeText, 50 + 10, stripY + 17, { width: halfW - 20, lineBreak: false, ellipsis: true });
+        doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
+           .text('PROJECT', 50 + halfW + 10, stripY + 6, { characterSpacing: 1.3 });
+        doc.fontSize(11).fillColor(INK).font('Helvetica-Bold')
+           .text(projectText, 50 + halfW + 10, stripY + 17, { width: halfW - 20, lineBreak: false, ellipsis: true });
+        doc.y = stripY + stripH + 16;
+      }
+
       // -- Form-specific body ----------------------------------------
       renderBody(doc, submission, payload, formMeta);
 
