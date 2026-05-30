@@ -306,6 +306,7 @@
       </button>
       <button class="admin-tab" data-tab="submissions">All Submissions</button>
       <button class="admin-tab" data-tab="employees">Employees</button>
+      <button class="admin-tab" data-tab="projects">Projects</button>
     </div>
 
     <!-- TAB: Pending Approvals -->
@@ -382,10 +383,52 @@
         </div>
       </div>
     </div>
+
+    <!-- TAB: Projects -->
+    <div class="admin-tabpane" id="tab-projects">
+      <div class="admin-toolbar">
+        <span class="admin-count" id="projCount"></span>
+        <button class="btn btn-submit" id="addProjectBtn" style="margin-left:auto;">+ Add Project</button>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="overflow-x:auto;">
+          <table class="admin-table" id="projTable">
+            <thead>
+              <tr>
+                <th>Name</th><th>Code</th><th>Status</th>
+                <th>Created</th><th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="projTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
 </div><!-- /app -->
+
+<!-- ============== PROJECT ADD/EDIT MODAL ============== -->
+<div class="modal-backdrop" id="projModalBackdrop">
+  <div class="modal" id="projModal" style="max-width:460px;">
+    <h3 id="projModalTitle">Add Project</h3>
+    <div class="field-grid" style="margin-top:8px;">
+      <div class="field full">
+        <label>Project Name <span class="req">*</span></label>
+        <input type="text" id="projName" placeholder="e.g. AMNS" />
+      </div>
+      <div class="field full">
+        <label>Short Code (optional)</label>
+        <input type="text" id="projCode" placeholder="optional short tag" />
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-ghost" id="projModalCancel">Cancel</button>
+      <button class="btn btn-submit" id="projModalSave">Save</button>
+    </div>
+  </div>
+</div>
 
 <!-- ============== EMPLOYEE ADD/EDIT MODAL ============== -->
 <div class="modal-backdrop" id="empModalBackdrop">

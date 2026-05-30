@@ -1880,3 +1880,21 @@ body::after {
 .vd-diff.balanced  { background: rgba(5,150,105,0.10);  color: var(--bsg-success); }
 .vd-diff.to-return { background: rgba(180,83,9,0.10);   color: var(--bsg-warning); }
 .vd-diff.to-claim  { background: rgba(37,99,235,0.10);  color: var(--bsg-blue); }
+
+/* Purpose + Project card on forms — slight visual lift */
+.purpose-project-card { border-left: 3px solid var(--bsg-blue); }
+
+/* Purpose strip on the preview screen — matches the PDF band */
+.preview-purpose-strip {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+  background: #eef2ff; padding: 14px 20px; border-radius: 4px;
+  margin-bottom: 20px;
+}
+.preview-purpose-strip .label {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--bsg-muted);
+  margin-bottom: 4px;
+}
+.preview-purpose-strip .value {
+  font-size: 14px; font-weight: 600; color: var(--bsg-ink);
+}

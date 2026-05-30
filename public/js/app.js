@@ -26,6 +26,9 @@
     currentPage: null,       // for the global Back button history
     openAdvances: [],        // employee's open Travel Advances awaiting settlement
     settling: null,          // { advance: <row>, actual_amount: '', notes: '' } while user is settling
+    projects: null,          // cached list of active projects for the Purpose+Project dropdown
+    adminProjects: [],       // admin's view of all projects (active + inactive)
+    editingProject: null,    // currently editing project (modal)
   };
 
   // ----- Constants ------------------------------------------------
@@ -189,10 +192,18 @@
     const p = s.payload || {};
 
     // Meta grid
+    const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit' };
+    const purposeText = PURPOSE_NAMES[s.purpose_category] || '—';
+    let projectText = '—';
+    if (s.project) projectText = s.project.code && s.project.code !== s.project.name ? `${s.project.name} (${s.project.code})` : s.project.name;
+    else if (s.client_name) projectText = `${s.client_name} (Prospect)`;
+
     const meta = el('div', { class: 'vd-grid' },
       detailRow('Employee', s.employee.name),
       detailRow('Code', s.employee.code),
       detailRow('Level', s.employee.level),
+      detailRow('Purpose', purposeText),
+      detailRow('Project', projectText),
       detailRow('Period', p.period || s.period),
       detailRow('Submitted', fmtDateShort(s.submitted_at)),
       detailRow('Status', s.status.charAt(0).toUpperCase() + s.status.slice(1)),
@@ -838,9 +849,40 @@
   function openForm(formKey) {
     state.currentForm = formKey;
     state.formData = initFormData(formKey);
+    // Every form now starts with categorization fields. They're stored on
+    // formData but stripped from the payload at submit time.
+    state.formData.purpose_category = '';
+    state.formData.project_id = '';
+    state.formData.client_name = '';
     state.uploadToken = uuid();
     state.uploads = [];
+    // Ensure projects are loaded (cached on state.projects)
+    loadProjectsIfNeeded();
     route('form');
+  }
+
+  // Projects (fetched once per session; refreshed when admin changes the list)
+  async function loadProjectsIfNeeded() {
+    if (Array.isArray(state.projects) && state.projects.length) return;
+    try {
+      const res = await api('/api/projects');
+      state.projects = res.projects || [];
+      // If the form is already rendered, refresh the project dropdown
+      const sel = $('#ppProjectSel');
+      if (sel) populateProjectOptions(sel);
+    } catch (_) { state.projects = []; }
+  }
+
+  function populateProjectOptions(sel) {
+    const current = sel.value;
+    sel.innerHTML = '<option value="">— Select project —</option>';
+    for (const p of (state.projects || [])) {
+      const opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.code && p.code !== p.name ? `${p.name} (${p.code})` : p.name;
+      sel.appendChild(opt);
+    }
+    if (current) sel.value = current;
   }
 
   function initFormData(formKey) {
@@ -939,6 +981,12 @@
       case 'met_accommodation': renderAccommodationForm(body); break;
     }
 
+    // Categorization card always rendered FIRST (prepended). Doing it after
+    // the switch lets each form push its content; then we insert this card
+    // at the top so it's visually first on every form.
+    const ppCard = buildPurposeProjectCard();
+    body.insertBefore(ppCard, body.firstChild);
+
     refreshUploadList();
     updateSummary();
 
@@ -947,6 +995,85 @@
     $('#submitBtn').onclick  = () => submitForm();
 
     bindUploadZone();
+  }
+
+  // -----------------------------------------------------------------
+  //  Purpose + Project card — shown at the top of EVERY form.
+  //  - Purpose is required (Project Visit / Site Visit / Sales Visit).
+  //  - For Project / Site Visit, a Project from the active list is required.
+  //  - For Sales Visit, the employee can either pick a project (existing
+  //    client) OR type a Client / Prospect name (free text).
+  // -----------------------------------------------------------------
+  function buildPurposeProjectCard() {
+    const fd = state.formData;
+    const card = el('div', { class: 'card purpose-project-card' },
+      el('div', { class: 'card-title' }, 'Purpose & Project')
+    );
+
+    const grid = el('div', { class: 'field-grid' });
+
+    // Purpose dropdown
+    const purposeField = el('div', { class: 'field' },
+      el('label', { for: 'ppPurposeSel' }, 'Purpose ', el('span', { class: 'req' }, '*'))
+    );
+    const purposeSel = el('select', { id: 'ppPurposeSel' });
+    purposeSel.innerHTML = '<option value="">— Select purpose —</option>'
+      + '<option value="project_visit">Project Visit</option>'
+      + '<option value="site_visit">Site Visit</option>'
+      + '<option value="sales_visit">Sales Visit</option>';
+    purposeSel.value = fd.purpose_category || '';
+    purposeSel.onchange = (e) => {
+      fd.purpose_category = e.target.value;
+      // Re-render this card only (to swap project<->client widgets for Sales Visit)
+      const newCard = buildPurposeProjectCard();
+      card.replaceWith(newCard);
+    };
+    purposeField.appendChild(purposeSel);
+    grid.appendChild(purposeField);
+
+    // Project dropdown / Client name (Sales Visit can use either)
+    const isSales = fd.purpose_category === 'sales_visit';
+    const projField = el('div', { class: 'field' },
+      el('label', { for: 'ppProjectSel' }, 'Project ', isSales ? null : el('span', { class: 'req' }, '*'))
+    );
+    const projectSel = el('select', { id: 'ppProjectSel' });
+    populateProjectOptions(projectSel);
+    projectSel.value = fd.project_id || '';
+    projectSel.onchange = (e) => {
+      fd.project_id = e.target.value;
+      // If a project is selected, clear any prospect client_name
+      if (e.target.value) fd.client_name = '';
+    };
+    projField.appendChild(projectSel);
+    grid.appendChild(projField);
+
+    card.appendChild(grid);
+
+    // For Sales Visit, also offer a Client / Prospect Name input as an
+    // alternative to picking a project from the list.
+    if (isSales) {
+      const clientField = el('div', { class: 'field full', style: 'margin-top:14px;' },
+        el('label', { for: 'ppClientName' }, 'Client / Prospect Name'),
+        el('div', { style: 'font-size:11px;color:var(--bsg-muted);margin-bottom:6px;' },
+          'For a Sales Visit, either pick an existing project above OR enter a new client / prospect name here.'
+        )
+      );
+      const clientInput = el('input', { id: 'ppClientName', type: 'text', placeholder: 'e.g. ABC Corp', class: 'ti' });
+      clientInput.value = fd.client_name || '';
+      clientInput.oninput = (e) => {
+        fd.client_name = e.target.value;
+        // If they're typing a prospect, clear any picked project
+        if (e.target.value && fd.project_id) {
+          fd.project_id = '';
+          const sel = $('#ppProjectSel');
+          if (sel) sel.value = '';
+        }
+      };
+      clientField.appendChild(clientInput);
+      card.appendChild(clientField);
+    }
+
+    return card;
   }
 
   function renderEntitlementBanner() {
@@ -1574,6 +1701,19 @@
 
     const fail = (msg) => { ok = false; firstErr = firstErr || msg; };
 
+    // Categorization (purpose + project) — required on every form
+    if (!fd.purpose_category) {
+      fail('Please pick a Purpose: Project Visit, Site Visit, or Sales Visit.');
+    } else if (fd.purpose_category === 'sales_visit') {
+      // Sales Visit: needs either a project OR a client/prospect name
+      if (!fd.project_id && !(fd.client_name && fd.client_name.trim())) {
+        fail('For a Sales Visit, pick a project or enter the client / prospect name.');
+      }
+    } else {
+      // Project Visit / Site Visit: project required
+      if (!fd.project_id) fail('Please select a Project for this visit.');
+    }
+
     if (F === 'bsc_conveyance' || F === 'met_local') {
       if (!fd.period) fail('Period is required.');
       if (!fd.trips.some(t => t.date && t.from && t.to && parseFloat(t.km) > 0)) fail('Add at least one complete trip.');
@@ -1673,6 +1813,23 @@
       ));
     }
     root.appendChild(info);
+
+    // Purpose & Project strip (matches the same band that goes into the PDF)
+    {
+      const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit' };
+      const purposeText = PURPOSE_NAMES[fd.purpose_category] || '—';
+      let projectText = '—';
+      if (fd.project_id) {
+        const p = (state.projects || []).find(x => String(x.id) === String(fd.project_id));
+        if (p) projectText = p.code && p.code !== p.name ? `${p.name} (${p.code})` : p.name;
+      } else if (fd.client_name) {
+        projectText = `${fd.client_name} (Prospect)`;
+      }
+      root.appendChild(el('div', { class: 'preview-purpose-strip' },
+        el('div', {}, el('div', { class: 'label' }, 'PURPOSE'), el('div', { class: 'value' }, purposeText)),
+        el('div', {}, el('div', { class: 'label' }, 'PROJECT'), el('div', { class: 'value' }, projectText))
+      ));
+    }
 
     // Body
     switch (F) {
@@ -2016,6 +2173,7 @@
     adminTab = tab;
     $$('.admin-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     $$('.admin-tabpane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
+    if (tab === 'projects') loadProjectsAdmin().then(drawProjectTable);
   }
 
   // ---- Pending approvals --------------------------------------------
@@ -2339,6 +2497,109 @@
     }
   }
 
+  // ---- Projects (admin) ---------------------------------------------
+  async function loadProjectsAdmin() {
+    try {
+      const res = await api('/api/admin/projects');
+      state.adminProjects = res.projects || [];
+    } catch (_) { state.adminProjects = []; }
+  }
+
+  function drawProjectTable() {
+    const tbody = $('#projTableBody'); if (!tbody) return;
+    tbody.innerHTML = '';
+    const rows = state.adminProjects || [];
+    if ($('#projCount')) $('#projCount').textContent = `${rows.length} project${rows.length === 1 ? '' : 's'}`;
+    if (!rows.length) {
+      tbody.appendChild(el('tr', {}, el('td', { colspan: 5, style: 'text-align:center;color:var(--bsg-muted);padding:32px;' }, 'No projects yet — click + Add Project.')));
+      return;
+    }
+    for (const p of rows) {
+      tbody.appendChild(el('tr', {},
+        el('td', {}, el('strong', {}, p.name)),
+        el('td', {}, p.code || '—'),
+        el('td', {}, el('span', { class: 'status-pill ' + (p.is_active ? 'approved' : 'rejected') }, p.is_active ? 'active' : 'inactive')),
+        el('td', {}, fmtDateShort(p.created_at)),
+        el('td', { style: 'text-align:right;' }, el('div', { class: 'admin-actions' },
+          el('button', { class: 'view', onclick: () => openProjectModal(p) }, 'Edit'),
+          p.is_active
+            ? el('button', { class: 'reject', onclick: () => deleteProject(p) }, 'Delete')
+            : el('button', { class: 'approve', onclick: () => reactivateProject(p) }, 'Reactivate')
+        ))
+      ));
+    }
+  }
+
+  function openProjectModal(project) {
+    state.editingProject = project; // null = add
+    $('#projModalTitle').textContent = project ? 'Edit Project' : 'Add Project';
+    $('#projName').value = project ? project.name : '';
+    $('#projCode').value = project && project.code ? project.code : '';
+    $('#projModalBackdrop').classList.add('show');
+  }
+
+  function closeProjectModal() {
+    $('#projModalBackdrop').classList.remove('show');
+    state.editingProject = null;
+  }
+
+  async function saveProject() {
+    const name = $('#projName').value.trim();
+    const code = $('#projCode').value.trim();
+    if (!name) { toast('Project name is required', 'error'); return; }
+    showLoading('Saving project…');
+    try {
+      const editing = state.editingProject;
+      if (editing) {
+        await api(`/api/admin/projects/${editing.id}`, {
+          method: 'PUT', body: JSON.stringify({ name, code }),
+        });
+      } else {
+        await api('/api/admin/projects', {
+          method: 'POST', body: JSON.stringify({ name, code }),
+        });
+      }
+      // Invalidate the cached active list used by forms
+      state.projects = null;
+      toast(editing ? 'Project updated' : 'Project added', 'success');
+      closeProjectModal();
+      await loadProjectsAdmin();
+      drawProjectTable();
+    } catch (err) {
+      toast(err.message || 'Save failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  async function deleteProject(project) {
+    const ok = await confirmModal({
+      title: 'Delete this project?',
+      body: `"${project.name}" will be removed. If any submissions reference it, the project is deactivated (kept for history) instead of being hard-deleted.`,
+      confirmText: 'Delete',
+    });
+    if (!ok) return;
+    try {
+      const res = await api(`/api/admin/projects/${project.id}`, { method: 'DELETE' });
+      state.projects = null;
+      toast(res.deactivated ? `Deactivated (kept for ${res.submissions_retained} submissions)` : 'Deleted', 'success');
+      await loadProjectsAdmin();
+      drawProjectTable();
+    } catch (err) {
+      toast(err.message || 'Delete failed', 'error');
+    }
+  }
+
+  async function reactivateProject(project) {
+    try {
+      await api(`/api/admin/projects/${project.id}`, {
+        method: 'PUT', body: JSON.stringify({ is_active: 1 }),
+      });
+      state.projects = null;
+      toast('Reactivated', 'success');
+      await loadProjectsAdmin();
+      drawProjectTable();
+    } catch (err) { toast(err.message || 'Reactivate failed', 'error'); }
+  }
+
   async function deactivateEmployee(emp) {
     const ok = await confirmModal({
       title: 'Deactivate employee?',
@@ -2404,6 +2665,12 @@
   $('#addEmpBtn') && $('#addEmpBtn').addEventListener('click', () => openEmployeeModal(null));
   $('#empModalCancel') && $('#empModalCancel').addEventListener('click', closeEmployeeModal);
   $('#empModalSave') && $('#empModalSave').addEventListener('click', saveEmployee);
+
+  // Project admin
+  $('#addProjectBtn')   && $('#addProjectBtn').addEventListener('click', () => openProjectModal(null));
+  $('#projModalCancel') && $('#projModalCancel').addEventListener('click', closeProjectModal);
+  $('#projModalSave')   && $('#projModalSave').addEventListener('click', saveProject);
+  $('#projModalBackdrop') && $('#projModalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'projModalBackdrop') closeProjectModal(); });
   $('#empSearch') && $('#empSearch').addEventListener('input', drawEmployeeTable);
   $('#showInactive') && $('#showInactive').addEventListener('change', async () => { await loadEmployees(); drawEmployeeTable(); });
   $('#empModalBackdrop') && $('#empModalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'empModalBackdrop') closeEmployeeModal(); });
