@@ -302,6 +302,97 @@ function validateMetAdvance(input, employee) {
   }, +amount.toFixed(2));
 }
 
+// ---- Metfraa: Daily Travel Reimbursement -------------------------
+// Per-entry shape (each entry is one commute trip):
+//   { date, mode, from, to, fare, remarks,
+//     purpose_category, project_id (or client_name for sales prospects),
+//     bill_pending_id }  ← required when mode != 'bus'
+//
+// The whole submission usually spans a calendar month — caller passes
+// `period` (YYYY-MM) for the month being reimbursed.
+const DTR_MODES = ['bus', 'bike_taxi', 'auto', 'share_auto'];
+const DTR_MODES_NEEDING_BILL = new Set(['bike_taxi', 'auto', 'share_auto']);
+function validateMetDtr(input, employee) {
+  if (!Array.isArray(input.entries) || input.entries.length === 0) {
+    return err('Add at least one daily travel entry.');
+  }
+  if (input.entries.length > 200) {
+    return err('Too many entries in a single submission (max 200).');
+  }
+  const cleanEntries = [];
+  let total = 0;
+  for (let i = 0; i < input.entries.length; i++) {
+    const e = input.entries[i] || {};
+    const rowLbl = `Entry #${i + 1}`;
+    if (!isDate(e.date))         return err(`${rowLbl}: date is required.`);
+    if (!isStr(e.mode) || !DTR_MODES.includes(e.mode))
+                                  return err(`${rowLbl}: mode of commute must be Bus, Bike Taxi, Auto, or Share Auto.`);
+    if (!isStr(e.from))           return err(`${rowLbl}: From location is required.`);
+    if (!isStr(e.to))             return err(`${rowLbl}: To location is required.`);
+    const fare = parseFloat(e.fare);
+    if (!(fare > 0))              return err(`${rowLbl}: fare must be greater than zero.`);
+
+    // Per-entry categorization (same rules as the submission-level version
+    // on other forms, applied row-by-row).
+    const purpose = (typeof e.purpose_category === 'string') ? e.purpose_category.trim() : '';
+    if (!purpose)                              return err(`${rowLbl}: pick a Purpose.`);
+    if (!PURPOSE_CATEGORIES.includes(purpose)) return err(`${rowLbl}: invalid Purpose.`);
+
+    let projectId = null, clientName = null;
+    const rawPid = e.project_id;
+    const rawCli = (typeof e.client_name === 'string') ? e.client_name.trim() : '';
+    if (purpose === 'sales_visit') {
+      if (rawPid != null && rawPid !== '') {
+        const n = parseInt(rawPid, 10);
+        if (!Number.isFinite(n) || n <= 0) return err(`${rowLbl}: invalid project selection.`);
+        projectId = n;
+      } else if (rawCli) {
+        clientName = rawCli.slice(0, 200);
+      } else {
+        return err(`${rowLbl}: pick a project or enter the client / prospect name.`);
+      }
+    } else {
+      if (rawPid == null || rawPid === '') return err(`${rowLbl}: select a Project.`);
+      const n = parseInt(rawPid, 10);
+      if (!Number.isFinite(n) || n <= 0) return err(`${rowLbl}: invalid project selection.`);
+      projectId = n;
+    }
+
+    // Bill requirement: anything other than Bus requires a bill (the
+    // employee uploaded it via /api/uploads with row_idx=i, and the
+    // client sends bill_pending_id pointing to that pending upload).
+    let billPendingId = null;
+    if (DTR_MODES_NEEDING_BILL.has(e.mode)) {
+      const raw = e.bill_pending_id;
+      if (raw == null || raw === '') {
+        return err(`${rowLbl}: a bill or receipt is required for ${e.mode.replace('_', ' ')}.`);
+      }
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n) || n <= 0) return err(`${rowLbl}: invalid bill reference.`);
+      billPendingId = n;
+    }
+
+    cleanEntries.push({
+      date: e.date,
+      mode: e.mode,
+      from: e.from.trim(),
+      to:   e.to.trim(),
+      fare: +fare.toFixed(2),
+      remarks: (typeof e.remarks === 'string') ? e.remarks.trim().slice(0, 300) || null : null,
+      purpose_category: purpose,
+      project_id: projectId,
+      client_name: clientName,
+      bill_pending_id: billPendingId,   // server uses this to link the attachment
+    });
+    total += fare;
+  }
+
+  return ok({
+    period: isStr(input.period) ? input.period : null,
+    entries: cleanEntries,
+  }, +total.toFixed(2));
+}
+
 const VALIDATORS = {
   bsc_conveyance:    validateBscConveyance,
   bsc_expense:       validateBscExpense,
@@ -311,6 +402,7 @@ const VALIDATORS = {
   met_outstation:    validateMetOutstation,
   met_misc:          validateMetMisc,
   met_advance:       validateMetAdvance,
+  met_dtr:           validateMetDtr,
 };
 
 const FORM_META = {
@@ -322,6 +414,7 @@ const FORM_META = {
   met_outstation:    { company: 'metfraa', title: 'Outstation Travel Reimbursement',  subtitle: 'Metfraa / OUT', policyForm: 'outstation' },
   met_misc:          { company: 'metfraa', title: 'Miscellaneous Reimbursement',      subtitle: 'Metfraa / MISC', policyForm: 'misc' },
   met_advance:       { company: 'metfraa', title: 'Travel Advance Request',           subtitle: 'Metfraa / ADV',  policyForm: 'advance' },
+  met_dtr:           { company: 'metfraa', title: 'Daily Travel Reimbursement',       subtitle: 'Metfraa / DTR',  policyForm: 'dtr' },
 };
 
 // Valid purpose categories — fixed list as agreed with the customer
@@ -335,6 +428,22 @@ function validate(formType, input, employee) {
   if (!meta) return err('Unknown form type');
   if (meta.company !== employee.company) {
     return err(`This form is not available to employees of ${employee.company.toUpperCase()}.`);
+  }
+
+  // Forms where Purpose+Project lives PER-ENTRY (not at submission level).
+  // For these, the form's own validator handles categorization on each row.
+  const PER_ENTRY_CATEGORIZATION = new Set(['met_dtr']);
+  if (PER_ENTRY_CATEGORIZATION.has(formType)) {
+    const cleanInput = { ...input };
+    delete cleanInput.purpose_category;
+    delete cleanInput.project_id;
+    delete cleanInput.client_name;
+    const result = v(cleanInput, employee);
+    if (!result.ok) return result;
+    // Leave submission-level meta empty — DB columns stay NULL. Dashboard
+    // walks the payload's entries instead.
+    result.meta = { purpose_category: null, project_id: null, client_name: null };
+    return result;
   }
 
   // --- Pull out + validate categorization (purpose + project) ---

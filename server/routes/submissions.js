@@ -23,7 +23,7 @@ function generateRef(company, formType) {
   const typeMap = {
     bsc_conveyance: 'CV', bsc_expense: 'EX',
     met_local: 'LT', met_cab: 'CB',
-    met_accommodation: 'AC', met_outstation: 'OT', met_misc: 'MS', met_advance: 'AD',
+    met_accommodation: 'AC', met_outstation: 'OT', met_misc: 'MS', met_advance: 'AD', met_dtr: 'DT',
   };
   const t = typeMap[formType] || 'XX';
   const d = new Date();
@@ -45,17 +45,58 @@ router.post('/', requireAuth, async (req, res) => {
     const v = validate(form_type, payload || {}, req.user);
     if (!v.ok) return res.status(400).json({ error: v.error });
 
-    // 2) Collect attachments from pending uploads
+    // 2) Collect attachments from pending uploads.
+    //
+    //   - Most forms: every pending upload under this token becomes a
+    //     form-level attachment (row_idx = null).
+    //   - Daily Travel Reimbursement: each entry has its own bill (or none
+    //     if Bus). We walk v.payload.entries and attach ONLY the pending
+    //     uploads referenced by an entry's bill_pending_id, stamping the
+    //     attachment with row_idx so the PDF/popup can show it next to
+    //     the right entry.
     const pending = upload_token ? stmts.listPendingByToken.all(upload_token, req.user.id) : [];
     console.log(`[submit] user=${req.user.email} form=${form_type} token=${upload_token} bills=${pending.length} files=${pending.map(p => p.filename).join('|')}`);
-    const attachments = pending.map(p => ({
-      filename: p.filename,
-      stored_path: p.stored_path,
-      mime_type: p.mime_type,
-      size_bytes: p.size_bytes,
-      category: 'general',
-      label: '',
-    }));
+
+    let attachments;
+    if (form_type === 'met_dtr') {
+      const pendingById = new Map(pending.map(p => [p.id, p]));
+      const claimed = new Set();
+      attachments = [];
+      const entries = (v.payload && Array.isArray(v.payload.entries)) ? v.payload.entries : [];
+      for (let i = 0; i < entries.length; i++) {
+        const billId = entries[i].bill_pending_id;
+        if (billId == null) continue;
+        const p = pendingById.get(billId);
+        if (!p) return res.status(400).json({ error: `Entry #${i + 1} references a bill that wasn't uploaded under this submission.` });
+        if (claimed.has(billId)) {
+          return res.status(400).json({ error: `Entry #${i + 1} references a bill already used by another entry — upload a separate file.` });
+        }
+        claimed.add(billId);
+        attachments.push({
+          filename: p.filename, stored_path: p.stored_path,
+          mime_type: p.mime_type, size_bytes: p.size_bytes,
+          category: 'dtr_bill', label: `Entry ${i + 1}`,
+          row_idx: i,
+        });
+      }
+      // Drop bill_pending_id from the persisted entries — replace it with
+      // a placeholder; the actual attachment lookup happens by row_idx.
+      v.payload.entries = entries.map((e, i) => {
+        const clone = { ...e };
+        delete clone.bill_pending_id;
+        return clone;
+      });
+    } else {
+      attachments = pending.map(p => ({
+        filename: p.filename,
+        stored_path: p.stored_path,
+        mime_type: p.mime_type,
+        size_bytes: p.size_bytes,
+        category: 'general',
+        label: '',
+        row_idx: null,
+      }));
+    }
 
     // 3) Persist the submission + attachments (atomic)
     const reference = generateRef(meta.company, form_type);
@@ -303,6 +344,25 @@ router.get('/:id', requireAuth, (req, res) => {
   const attachments = stmts.listAttachments.all(sub.id);
   // Look up the linked project (if any) for friendly display
   const project = sub.project_id ? stmts.getProject.get(sub.project_id) : null;
+
+  // DTR: pre-resolve project IDs referenced by entries so the popup can
+  // show project names without needing a second API call per row.
+  let dtrProjectLookup = null;
+  if (sub.form_type === 'met_dtr') {
+    dtrProjectLookup = {};
+    try {
+      const pl = JSON.parse(sub.payload_json || '{}');
+      const seen = new Set();
+      for (const e of (pl.entries || [])) {
+        if (e && e.project_id != null && !seen.has(e.project_id)) {
+          seen.add(e.project_id);
+          const pj = stmts.getProject.get(e.project_id);
+          if (pj) dtrProjectLookup[e.project_id] = { id: pj.id, code: pj.code, name: pj.name };
+        }
+      }
+    } catch (_) { /* malformed payload — leave lookup empty */ }
+  }
+
   res.json({
     submission: {
       id: sub.id, reference: sub.reference, company: sub.company,
@@ -313,6 +373,7 @@ router.get('/:id', requireAuth, (req, res) => {
       purpose_category: sub.purpose_category,
       project: project ? { id: project.id, code: project.code, name: project.name } : null,
       client_name: sub.client_name,
+      dtr_project_lookup: dtrProjectLookup,
       // Travel-advance settlement fields (null for non-advance submissions)
       actuals: sub.actuals_json ? JSON.parse(sub.actuals_json) : null,
       settled_at: sub.settled_at,
@@ -326,7 +387,7 @@ router.get('/:id', requireAuth, (req, res) => {
       },
       attachments: attachments.map(a => ({
         id: a.id, filename: a.filename, mime_type: a.mime_type,
-        size_bytes: a.size_bytes, category: a.category,
+        size_bytes: a.size_bytes, category: a.category, row_idx: a.row_idx,
       })),
     }
   });

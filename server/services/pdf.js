@@ -317,6 +317,7 @@ function renderBody(doc, sub, payload, formMeta) {
     case 'met_outstation':       return renderMetOutstation(doc, payload);
     case 'met_misc':             return renderMetMisc(doc, payload);
     case 'met_advance':          return renderMetAdvance(doc, payload);
+    case 'met_dtr':              return renderMetDtr(doc, payload, sub);
     default:
       doc.fontSize(11).fillColor(INK).text(JSON.stringify(payload, null, 2));
   }
@@ -486,6 +487,62 @@ function renderMetMisc(doc, p) {
     `₹ ${fmt(parseFloat(it.amount) || 0)}`,
   ]));
   table(doc, ['Date', 'Purpose', 'Amount'], rows, [90, 290, 95], { numericCols: [2] });
+}
+
+// ---- Metfraa: Daily Travel Reimbursement -------------------------
+//   Renders the month's daily commute entries as a compact table.
+//   Bills (if any) are merged in after this report by pdf-merge — for
+//   each entry that had a bill, we show "Bill ✓" in the table.
+function renderMetDtr(doc, p, sub) {
+  const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
+  const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales' };
+  const lookup = (sub && sub.project_lookup) || {};
+  const entries = Array.isArray(p.entries) ? p.entries : [];
+
+  sectionHeading(doc, `Daily Travel · ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}`);
+
+  const rows = entries.map(e => {
+    let project = '—';
+    if (e.project_id != null && lookup[e.project_id]) {
+      const pr = lookup[e.project_id];
+      project = pr.code && pr.code !== pr.name ? `${pr.name} (${pr.code})` : pr.name;
+    } else if (e.client_name) {
+      project = `${e.client_name} (Prospect)`;
+    }
+    const bill = e.mode === 'bus' ? '—' : 'Yes';
+    return [
+      formatDate(e.date),
+      MODE_LABEL[e.mode] || e.mode,
+      e.from || '—',
+      e.to || '—',
+      PURPOSE_LABEL[e.purpose_category] || '—',
+      project,
+      bill,
+      `₹ ${fmt(parseFloat(e.fare) || 0)}`,
+    ];
+  });
+
+  // Widths: Date / Mode / From / To / Purpose / Project / Bill / Fare
+  // The table helper normalises these to fit page width.
+  table(doc,
+    ['Date', 'Mode', 'From', 'To', 'Purpose', 'Project', 'Bill', 'Fare'],
+    rows,
+    [54, 56, 80, 80, 50, 90, 30, 55],
+    { numericCols: [7] }
+  );
+
+  // If any entries have remarks, list them after the table (per-row,
+  // referenced by date — keeps the main table compact).
+  const withRemarks = entries.filter(e => e.remarks);
+  if (withRemarks.length) {
+    doc.moveDown(0.6);
+    doc.fontSize(9).fillColor(MUTED).font('Helvetica-Bold').text('REMARKS', { characterSpacing: 1.3 });
+    doc.moveDown(0.3);
+    doc.fontSize(9).fillColor(INK).font('Helvetica');
+    for (const e of withRemarks) {
+      doc.text(`${formatDate(e.date)} — ${e.remarks}`, { width: doc.page.width - 100 });
+    }
+  }
 }
 
 // ---- Metfraa: Travel Advance Request -------------------------------

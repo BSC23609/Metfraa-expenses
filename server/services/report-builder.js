@@ -21,6 +21,21 @@ async function buildReportPdf(sub, { draft = true } = {}) {
   const outPath = path.join(REPORTS_DIR, `${sub.reference}${draft ? '__draft' : '__report'}.pdf`);
   // Resolve linked project (if any) so the PDF can show it
   const project = sub.project_id ? stmts.getProject.get(sub.project_id) : null;
+  // For forms with per-entry projects (DTR), pre-resolve ALL project IDs
+  // referenced by entries — the PDF renderer reads from this lookup.
+  let payloadParsed;
+  try { payloadParsed = JSON.parse(sub.payload_json || '{}'); } catch (_) { payloadParsed = {}; }
+  const projectLookup = {};
+  if (sub.form_type === 'met_dtr' && Array.isArray(payloadParsed.entries)) {
+    const seen = new Set();
+    for (const e of payloadParsed.entries) {
+      if (e && e.project_id != null && !seen.has(e.project_id)) {
+        seen.add(e.project_id);
+        const p = stmts.getProject.get(e.project_id);
+        if (p) projectLookup[e.project_id] = p;
+      }
+    }
+  }
   await generatePdf({
     submission: {
       reference: sub.reference, form_type: sub.form_type, company: sub.company,
@@ -28,12 +43,13 @@ async function buildReportPdf(sub, { draft = true } = {}) {
       purpose_category: sub.purpose_category || null,
       project: project ? { id: project.id, code: project.code, name: project.name } : null,
       client_name: sub.client_name || null,
+      project_lookup: projectLookup,
     },
     employee: {
       name: sub.employee_name, email: sub.employee_email, employee_code: sub.employee_code,
       designation: sub.designation, department: sub.department, level: sub.level,
     },
-    payload: JSON.parse(sub.payload_json || '{}'),
+    payload: payloadParsed,
     attachments,
     formMeta: { title: meta.title, subtitle: meta.subtitle },
     outPath,

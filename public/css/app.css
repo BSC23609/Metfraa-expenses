@@ -1963,3 +1963,57 @@ body::after {
   .dash-charts { grid-template-columns: 1fr; }
   .dash-chart-wide { grid-column: auto; }
 }
+
+/* ---- Daily Travel Reimbursement form ------------------------------ */
+.dtr-entries { display: flex; flex-direction: column; gap: 14px; margin-bottom: 14px; }
+.dtr-entry {
+  border-left: 3px solid var(--bsg-blue);
+  padding: 18px 22px;
+}
+.dtr-entry-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--bsg-line);
+}
+.dtr-entry-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--bsg-muted);
+}
+.remove-row-btn {
+  background: transparent; border: 1px solid var(--bsg-line);
+  color: var(--bsg-danger); padding: 5px 12px; border-radius: 3px;
+  font-size: 12px; cursor: pointer;
+}
+.remove-row-btn:hover { background: rgba(220, 38, 38, 0.08); }
+.dtr-purpose-block {
+  margin-top: 12px; padding: 12px 14px;
+  background: #f6f8fa; border-radius: 4px;
+}
+.dtr-purpose-lbl {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--bsg-muted); margin-bottom: 10px;
+}
+.dtr-bill-zone {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; border: 1.5px dashed var(--bsg-line);
+  border-radius: 4px; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.dtr-bill-zone:hover {
+  background: rgba(37, 99, 235, 0.04); border-color: var(--bsg-blue);
+}
+.dtr-bill-zone .icon { font-size: 20px; }
+.dtr-bill-zone .text { font-weight: 500; color: var(--bsg-ink); font-size: 13px; }
+.dtr-bill-zone .hint { font-size: 11px; color: var(--bsg-muted); margin-top: 2px; }
+.dtr-bill-attached {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; background: rgba(5, 150, 105, 0.08);
+  border-left: 3px solid var(--bsg-success); border-radius: 3px;
+}
+.dtr-bill-attached .fname { flex: 1; font-size: 13px; color: var(--bsg-ink); }
+.dtr-bill-attached .remove {
+  background: transparent; border: 0; color: var(--bsg-muted);
+  font-size: 18px; cursor: pointer; padding: 0 6px;
+}
+.dtr-bill-attached .remove:hover { color: var(--bsg-danger); }

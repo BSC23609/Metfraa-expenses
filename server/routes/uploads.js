@@ -82,6 +82,15 @@ router.post('/', requireAuth, (req, res, next) => {
     if (!uploadToken) return res.status(400).json({ error: 'upload_token required' });
     if (!req.files || !req.files.length) return res.status(400).json({ error: 'No files received' });
 
+    // Optional per-row index for forms that attach bills to specific entries
+    // (currently only Daily Travel Reimbursement). For other forms this is
+    // null and the bill is form-level.
+    let rowIdx = null;
+    if (req.body.row_idx != null && req.body.row_idx !== '') {
+      const n = parseInt(req.body.row_idx, 10);
+      if (Number.isFinite(n) && n >= 0 && n < 1000) rowIdx = n;
+    }
+
     const records = [];
     for (const f of req.files) {
       // Store the ABSOLUTE path. All resolvers handle absolute paths, so
@@ -93,12 +102,14 @@ router.post('/', requireAuth, (req, res, next) => {
         stored_path: f.path,
         mime_type: f.mimetype,
         size_bytes: f.size,
+        row_idx: rowIdx,
       });
       records.push({
         id: info.lastInsertRowid,
         filename: f.originalname,
         mime_type: f.mimetype,
         size_bytes: f.size,
+        row_idx: rowIdx,
       });
     }
 

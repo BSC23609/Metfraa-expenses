@@ -507,6 +507,10 @@ router.get('/dashboard', requireAdmin, (req, res) => {
         addCat('misc', amount);
       } else if (r.form_type === 'met_advance') {
         addCat('advance', amount);
+      } else if (r.form_type === 'met_dtr') {
+        // Daily commute — public transport / autos. Whole submission goes
+        // into 'own_travel' (same conceptual bucket as Local Travel Allowance).
+        addCat('own_travel', amount);
       } else if (r.form_type === 'met_outstation' || r.form_type === 'bsc_expense') {
         // Walk the payload's trips and split by category
         try {
@@ -532,7 +536,38 @@ router.get('/dashboard', requireAdmin, (req, res) => {
       }
 
       // --- Project attribution ---
-      if (r.project_id) {
+      // DTR has per-entry projects (submission-level project_id is NULL).
+      // Walk entries and credit each one's fare to its own project bucket.
+      if (r.form_type === 'met_dtr') {
+        try {
+          const payload = JSON.parse(r.payload_json || '{}');
+          for (const e of (payload.entries || [])) {
+            const fare = parseFloat(e.fare) || 0;
+            if (fare <= 0) continue;
+            if (e.project_id) {
+              const pj = projectMap.get(e.project_id);
+              const name = pj ? (pj.code && pj.code !== pj.name ? `${pj.name} (${pj.code})` : pj.name) : `Project #${e.project_id}`;
+              const cur = byProject[e.project_id] || { name, total: 0 };
+              cur.total += fare;
+              byProject[e.project_id] = cur;
+            } else if (e.client_name) {
+              const key = 'prospect:' + e.client_name.toLowerCase();
+              const cur = byProject[key] || { name: e.client_name + ' (Prospect)', total: 0 };
+              cur.total += fare;
+              byProject[key] = cur;
+            } else {
+              const cur = byProject['_unspecified'] || { name: 'No Project', total: 0 };
+              cur.total += fare;
+              byProject['_unspecified'] = cur;
+            }
+          }
+        } catch (_) {
+          // Fall through — DTR with malformed payload counts as unspecified
+          const cur = byProject['_unspecified'] || { name: 'No Project', total: 0 };
+          cur.total += amount;
+          byProject['_unspecified'] = cur;
+        }
+      } else if (r.project_id) {
         const p = projectMap.get(r.project_id);
         const name = p ? (p.code && p.code !== p.name ? `${p.name} (${p.code})` : p.name) : `Project #${r.project_id}`;
         const cur = byProject[r.project_id] || { name, total: 0 };

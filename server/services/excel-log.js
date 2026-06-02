@@ -146,6 +146,7 @@ function formTitle(t) {
     met_outstation: 'Outstation Travel',
     met_misc: 'Miscellaneous Reimbursement',
     met_advance: 'Travel Advance Request',
+    met_dtr: 'Daily Travel Reimbursement',
     bsc_conveyance: 'Local Conveyance',
     bsc_expense: 'Travel Expense',
   })[t] || t;

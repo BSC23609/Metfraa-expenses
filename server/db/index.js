@@ -180,6 +180,14 @@ db.exec(`
   eadd('password_hash',  `password_hash TEXT`);
   eadd('must_change_pw', `must_change_pw INTEGER NOT NULL DEFAULT 0`);
 
+  // Per-row uploads (Daily Travel Reimbursement attaches one bill per
+  // entry, not one per submission). row_idx is nullable — older
+  // submissions and other forms keep it NULL.
+  const acols = db.prepare(`PRAGMA table_info(attachments)`).all().map(c => c.name);
+  if (!acols.includes('row_idx')) db.exec(`ALTER TABLE attachments ADD COLUMN row_idx INTEGER`);
+  const pcols = db.prepare(`PRAGMA table_info(pending_uploads)`).all().map(c => c.name);
+  if (!pcols.includes('row_idx')) db.exec(`ALTER TABLE pending_uploads ADD COLUMN row_idx INTEGER`);
+
   // Seed starter projects if the table is empty. Once admin starts managing
   // them this block does nothing (we only seed when count is zero, not when
   // a specific code is missing — so the admin can delete defaults safely).
@@ -320,15 +328,18 @@ const stmts = {
   `),
 
   insertAttachment: db.prepare(`
-    INSERT INTO attachments (submission_id, filename, stored_path, mime_type, size_bytes, category, label)
-    VALUES (@submission_id, @filename, @stored_path, @mime_type, @size_bytes, @category, @label)
+    INSERT INTO attachments (submission_id, filename, stored_path, mime_type, size_bytes, category, label, row_idx)
+    VALUES (@submission_id, @filename, @stored_path, @mime_type, @size_bytes, @category, @label, @row_idx)
   `),
   listAttachments: db.prepare(`SELECT * FROM attachments WHERE submission_id = ? ORDER BY id`),
 
   insertPendingUpload: db.prepare(`
-    INSERT INTO pending_uploads (upload_token, employee_id, filename, stored_path, mime_type, size_bytes)
-    VALUES (@upload_token, @employee_id, @filename, @stored_path, @mime_type, @size_bytes)
+    INSERT INTO pending_uploads (upload_token, employee_id, filename, stored_path, mime_type, size_bytes, row_idx)
+    VALUES (@upload_token, @employee_id, @filename, @stored_path, @mime_type, @size_bytes, @row_idx)
   `),
+  // Look up one pending upload by ID (used to verify ownership when an
+  // entry references its bill via the pending upload's id).
+  getPendingUpload: db.prepare(`SELECT * FROM pending_uploads WHERE id = ?`),
   listPendingByToken: db.prepare(`SELECT * FROM pending_uploads WHERE upload_token = ? AND employee_id = ?`),
   deletePending: db.prepare(`DELETE FROM pending_uploads WHERE id = ? AND employee_id = ?`),
   deletePendingByToken: db.prepare(`DELETE FROM pending_uploads WHERE upload_token = ?`),

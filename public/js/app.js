@@ -49,6 +49,7 @@
       { key: 'met_outstation',    title: 'Outstation Travel Reimbursement',  desc: 'Inter-city official travel.', icon: 'briefcase' },
       { key: 'met_misc',          title: 'Miscellaneous Reimbursements',      desc: 'Any other work expense — date, purpose, amount + bill.', icon: 'receipt' },
       { key: 'met_advance',       title: 'Travel Advance Request',            desc: 'Request an upfront amount for an upcoming official trip.', icon: 'briefcase' },
+      { key: 'met_dtr',           title: 'Daily Travel Reimbursement',        desc: 'Daily commute — Bus / Bike Taxi / Auto / Share Auto. Submit at month end.', icon: 'bike' },
     ],
   };
 
@@ -310,6 +311,30 @@
         el('td', { style: 'font-weight:600;width:30%;' }, label),
         el('td', {}, val)
       )));
+    } else if (s.form_type === 'met_dtr') {
+      const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
+      const PURPOSE_LABEL = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit' };
+      // Project lookup map sent down on the submission (server resolves project IDs to names)
+      const projLookup = s.dtr_project_lookup || {};
+      head(['Date', 'Mode', 'From → To', 'Purpose', 'Project', 'Bill', 'Fare']);
+      (p.entries || []).forEach(e => {
+        let project = '—';
+        if (e.project_id != null && projLookup[e.project_id]) {
+          const pr = projLookup[e.project_id];
+          project = pr.code && pr.code !== pr.name ? `${pr.name} (${pr.code})` : pr.name;
+        } else if (e.client_name) {
+          project = `${e.client_name} (Prospect)`;
+        }
+        body.appendChild(el('tr', {},
+          el('td', {}, formatDate(e.date)),
+          el('td', {}, MODE_LABEL[e.mode] || e.mode),
+          el('td', {}, (e.from || '—') + ' → ' + (e.to || '—')),
+          el('td', {}, PURPOSE_LABEL[e.purpose_category] || '—'),
+          el('td', {}, project),
+          el('td', {}, e.mode === 'bus' ? '—' : '✓'),
+          el('td', { class: 'num' }, money(e.fare))
+        ));
+      });
     }
     t.appendChild(body);
     wrap.appendChild(t);
@@ -942,7 +967,23 @@
           notes: '',
           amount: '',
         };
+      case 'met_dtr':
+        // Daily Travel Reimbursement — month-long collection of commute trips.
+        // Each entry has its own purpose/project + (for non-bus modes) a bill.
+        return {
+          period, // YYYY-MM, defaults to current month
+          entries: [makeBlankDtrEntry()],
+        };
     }
+  }
+
+  function makeBlankDtrEntry() {
+    return {
+      date: '', mode: '', from: '', to: '', fare: '', remarks: '',
+      purpose_category: '', project_id: '', client_name: '',
+      bill_pending_id: null,   // upload id for the row's bill (non-bus only)
+      bill_filename: null,     // display only
+    };
   }
 
   // -- form titles
@@ -955,6 +996,7 @@
     met_outstation: 'Outstation Travel Reimbursement',
     met_misc:       'Miscellaneous Reimbursements',
     met_advance:    'Travel Advance Request',
+    met_dtr:        'Daily Travel Reimbursement',
   };
 
   function renderForm() {
@@ -966,8 +1008,10 @@
     renderEntitlementBanner();
 
     // Travel Advance is pre-trip — no bills yet, no item-list total to live-update.
+    // DTR has its OWN per-row uploads, not the form-level zone.
     const isAdvance = state.currentForm === 'met_advance';
-    $('#uploadSection').style.display = isAdvance ? 'none' : '';
+    const isDtr     = state.currentForm === 'met_dtr';
+    $('#uploadSection').style.display = (isAdvance || isDtr) ? 'none' : '';
     $('#summaryBar').style.display    = isAdvance ? 'none' : '';
 
     switch (state.currentForm) {
@@ -978,14 +1022,15 @@
       case 'met_cab':        renderCabForm(body); break;
       case 'met_misc':       renderMiscForm(body); break;
       case 'met_advance':    renderAdvanceForm(body); break;
+      case 'met_dtr':        renderDtrForm(body); break;
       case 'met_accommodation': renderAccommodationForm(body); break;
     }
 
-    // Categorization card always rendered FIRST (prepended). Doing it after
-    // the switch lets each form push its content; then we insert this card
-    // at the top so it's visually first on every form.
-    const ppCard = buildPurposeProjectCard();
-    body.insertBefore(ppCard, body.firstChild);
+    // DTR has per-row categorization — skip the submission-level card.
+    if (!isDtr) {
+      const ppCard = buildPurposeProjectCard();
+      body.insertBefore(ppCard, body.firstChild);
+    }
 
     refreshUploadList();
     updateSummary();
@@ -1124,6 +1169,9 @@
     } else if (F === 'met_advance') {
       label = 'Advance Request';
       value = 'For upcoming trips only  ·  enter estimated amount + justification  ·  settle after travel with actual bills';
+    } else if (F === 'met_dtr') {
+      label = 'Daily Travel';
+      value = 'Add an entry per commute trip  ·  <strong>Bus = no bill</strong>  ·  Bike Taxi / Auto / Share Auto need a bill per trip';
     }
 
     if (!value) return;
@@ -1541,6 +1589,298 @@
     body.appendChild(entriesCard);
   }
 
+  // ---- Daily Travel Reimbursement ---------------------------------
+  //   Month-long batch of commute trips. Each entry is a self-contained
+  //   card with its own purpose/project AND its own (conditional) bill
+  //   upload. Bus rides need no bill; everything else does.
+  function renderDtrForm(body) {
+    const fd = state.formData;
+
+    // Header card — period (month) selection + summary
+    body.appendChild(el('div', { class: 'card' },
+      el('div', { class: 'card-title' }, 'Reimbursement Period'),
+      el('div', { class: 'field-grid' },
+        el('div', { class: 'field' },
+          el('label', { for: 'dtrPeriod' }, 'Month ', el('span', { class: 'req' }, '*')),
+          (() => {
+            const ip = el('input', { id: 'dtrPeriod', type: 'month' });
+            ip.value = fd.period || '';
+            ip.oninput = (e) => { fd.period = e.target.value; };
+            return ip;
+          })()
+        ),
+        el('div', { class: 'field' },
+          el('label', {}, 'Entries'),
+          el('div', { style: 'padding:8px 0;font-size:14px;color:var(--bsg-ink);' },
+            (fd.entries || []).length + ' entries · ₹ ' + fmt(calcTotalAndCount().total)
+          )
+        )
+      ),
+      el('div', { style: 'font-size:11px;color:var(--bsg-muted);margin-top:8px;' },
+        'Add one entry per commute trip. Bus rides need no bill; for Bike Taxi, Auto, or Share Auto, attach a bill on the row itself.'
+      )
+    ));
+
+    // Entries
+    const entriesWrap = el('div', { class: 'dtr-entries' });
+    (fd.entries || []).forEach((e, idx) => {
+      entriesWrap.appendChild(buildDtrEntryCard(e, idx));
+    });
+    body.appendChild(entriesWrap);
+
+    body.appendChild(el('button', {
+      class: 'add-row-btn',
+      onclick: () => { fd.entries.push(makeBlankDtrEntry()); renderForm(); }
+    }, '+ Add Daily Entry'));
+  }
+
+  function buildDtrEntryCard(e, idx) {
+    const card = el('div', { class: 'card dtr-entry' });
+
+    // Header strip with the entry number and a remove button
+    card.appendChild(el('div', { class: 'dtr-entry-head' },
+      el('div', { class: 'dtr-entry-num' }, 'Entry #' + (idx + 1)),
+      (state.formData.entries.length > 1)
+        ? el('button', { class: 'remove-row-btn', onclick: () => {
+            state.formData.entries.splice(idx, 1);
+            renderForm();
+          } }, '× Remove')
+        : null
+    ));
+
+    // Row 1: Date | Mode | Fare
+    card.appendChild(el('div', { class: 'field-grid' },
+      el('div', { class: 'field' },
+        el('label', {}, 'Date ', el('span', { class: 'req' }, '*')),
+        (() => {
+          const ip = el('input', { type: 'date' });
+          ip.value = e.date || '';
+          ip.oninput = (ev) => { e.date = ev.target.value; };
+          return ip;
+        })()
+      ),
+      el('div', { class: 'field' },
+        el('label', {}, 'Mode ', el('span', { class: 'req' }, '*')),
+        (() => {
+          const sel = el('select');
+          sel.innerHTML = '<option value="">— Select mode —</option>'
+            + '<option value="bus">Bus</option>'
+            + '<option value="bike_taxi">Bike Taxi</option>'
+            + '<option value="auto">Auto</option>'
+            + '<option value="share_auto">Share Auto</option>';
+          sel.value = e.mode || '';
+          sel.onchange = (ev) => {
+            const prev = e.mode;
+            e.mode = ev.target.value;
+            // If switching TO bus, clear any uploaded bill (it's no longer needed)
+            if (e.mode === 'bus' && e.bill_pending_id) {
+              const billId = e.bill_pending_id;
+              e.bill_pending_id = null;
+              e.bill_filename = null;
+              // Best-effort cleanup of the orphaned pending upload
+              api(`/api/uploads/${billId}?token=${encodeURIComponent(state.uploadToken)}`, { method: 'DELETE' })
+                .catch(() => { /* ignore */ });
+            }
+            // Re-render this row so the upload widget shows/hides
+            if (prev !== e.mode) renderForm();
+          };
+          return sel;
+        })()
+      ),
+      el('div', { class: 'field' },
+        el('label', {}, 'Fare (₹) ', el('span', { class: 'req' }, '*')),
+        (() => {
+          const ip = el('input', { type: 'number', step: '0.01', min: '0', placeholder: '0.00' });
+          ip.value = e.fare || '';
+          ip.oninput = (ev) => { e.fare = ev.target.value; updateSummary(); };
+          return ip;
+        })()
+      )
+    ));
+
+    // Row 2: From | To
+    card.appendChild(el('div', { class: 'field-grid' },
+      el('div', { class: 'field' },
+        el('label', {}, 'From ', el('span', { class: 'req' }, '*')),
+        (() => {
+          const ip = el('input', { type: 'text', placeholder: 'e.g. Home, Office, Adyar' });
+          ip.value = e.from || '';
+          ip.oninput = (ev) => { e.from = ev.target.value; };
+          return ip;
+        })()
+      ),
+      el('div', { class: 'field' },
+        el('label', {}, 'To ', el('span', { class: 'req' }, '*')),
+        (() => {
+          const ip = el('input', { type: 'text', placeholder: 'e.g. Client Site, AMNS' });
+          ip.value = e.to || '';
+          ip.oninput = (ev) => { e.to = ev.target.value; };
+          return ip;
+        })()
+      )
+    ));
+
+    // Row 3: Per-row Purpose & Project (with progressive disclosure like the
+    // submission-level card)
+    card.appendChild(buildDtrPurposeProjectInline(e, idx));
+
+    // Row 4: Remarks (optional)
+    card.appendChild(el('div', { class: 'field full', style: 'margin-top:10px;' },
+      el('label', {}, 'Remarks (optional)'),
+      (() => {
+        const ta = el('textarea', { class: 'ti', rows: 2, placeholder: 'Any notes about this trip…' });
+        ta.value = e.remarks || '';
+        ta.oninput = (ev) => { e.remarks = ev.target.value; };
+        return ta;
+      })()
+    ));
+
+    // Row 5: Bill upload (only for non-bus modes)
+    const needsBill = e.mode && e.mode !== 'bus';
+    if (needsBill) {
+      card.appendChild(buildDtrBillUploader(e, idx));
+    } else if (e.mode === 'bus') {
+      card.appendChild(el('div', {
+        style: 'margin-top:10px;padding:8px 12px;background:rgba(5,150,105,0.08);border-radius:3px;font-size:12px;color:var(--bsg-success);'
+      }, 'No bill required for Bus.'));
+    }
+
+    return card;
+  }
+
+  // Inline purpose+project for a single DTR entry (mirrors buildPurposeProjectCard but flat)
+  function buildDtrPurposeProjectInline(e, idx) {
+    const wrap = el('div', { class: 'dtr-purpose-block' },
+      el('div', { class: 'dtr-purpose-lbl' }, 'Purpose & Project for this entry')
+    );
+
+    const grid = el('div', { class: 'field-grid' });
+
+    // Purpose
+    const purposeSel = el('select');
+    purposeSel.innerHTML = '<option value="">— Select purpose —</option>'
+      + '<option value="project_visit">Project Visit</option>'
+      + '<option value="site_visit">Site Visit</option>'
+      + '<option value="sales_visit">Sales Visit</option>';
+    purposeSel.value = e.purpose_category || '';
+    purposeSel.onchange = (ev) => {
+      const prev = e.purpose_category;
+      e.purpose_category = ev.target.value;
+      if (prev !== ev.target.value) {
+        e.project_id = '';
+        e.client_name = '';
+      }
+      renderForm();   // re-render to reveal/swap the Project/Client field
+    };
+    grid.appendChild(el('div', { class: 'field' },
+      el('label', {}, 'Purpose ', el('span', { class: 'req' }, '*')),
+      purposeSel
+    ));
+
+    // Project — only after purpose is picked
+    const hasPurpose = !!e.purpose_category;
+    const isSales = e.purpose_category === 'sales_visit';
+    if (hasPurpose) {
+      const projSel = el('select');
+      populateProjectOptions(projSel);
+      projSel.value = e.project_id || '';
+      projSel.onchange = (ev) => {
+        e.project_id = ev.target.value;
+        if (ev.target.value) e.client_name = '';
+      };
+      grid.appendChild(el('div', { class: 'field' },
+        el('label', {}, 'Project ', isSales ? null : el('span', { class: 'req' }, '*')),
+        projSel
+      ));
+    }
+
+    wrap.appendChild(grid);
+
+    if (!hasPurpose) {
+      wrap.appendChild(el('div', {
+        style: 'margin-top:8px;padding:8px 10px;background:#f6f8fa;border-radius:3px;font-size:11px;color:var(--bsg-muted);'
+      }, 'Select a purpose above to pick the project.'));
+    } else if (isSales) {
+      const ip = el('input', { type: 'text', placeholder: 'e.g. ABC Corp', class: 'ti' });
+      ip.value = e.client_name || '';
+      ip.oninput = (ev) => {
+        e.client_name = ev.target.value;
+        if (ev.target.value && e.project_id) {
+          e.project_id = '';
+          // The Project select is the previous sibling — clear its visible value
+          const projSel = wrap.querySelector('select:nth-of-type(2)');
+          if (projSel) projSel.value = '';
+        }
+      };
+      wrap.appendChild(el('div', { class: 'field full', style: 'margin-top:10px;' },
+        el('label', {}, 'Client / Prospect Name'),
+        el('div', { style: 'font-size:11px;color:var(--bsg-muted);margin-bottom:6px;' },
+          'For a Sales Visit, either pick a project above OR enter the client name.'
+        ),
+        ip
+      ));
+    }
+
+    return wrap;
+  }
+
+  // Per-row bill uploader for DTR entries that need a bill
+  function buildDtrBillUploader(e, idx) {
+    const wrap = el('div', { class: 'dtr-bill', style: 'margin-top:12px;' });
+
+    if (e.bill_pending_id && e.bill_filename) {
+      // Already uploaded — show name + remove
+      wrap.appendChild(el('div', { class: 'dtr-bill-attached' },
+        el('span', { class: 'icon' }, '📎'),
+        el('span', { class: 'fname' }, e.bill_filename),
+        el('button', { class: 'remove', onclick: async () => {
+          try {
+            await api(`/api/uploads/${e.bill_pending_id}?token=${encodeURIComponent(state.uploadToken)}`, { method: 'DELETE' });
+            e.bill_pending_id = null;
+            e.bill_filename = null;
+            renderForm();
+          } catch (err) { toast(err.message || 'Failed to remove', 'error'); }
+        } }, '×')
+      ));
+      return wrap;
+    }
+
+    // Not yet uploaded — show the dropzone
+    const inputId = 'dtrBillInput_' + idx;
+    const zone = el('label', { for: inputId, class: 'dtr-bill-zone' },
+      el('span', { class: 'icon' }, '📎'),
+      el('div', {},
+        el('div', { class: 'text' }, 'Attach bill / receipt for this trip'),
+        el('div', { class: 'hint' }, 'Required for ' + (e.mode === 'bike_taxi' ? 'Bike Taxi' : (e.mode === 'auto' ? 'Auto' : 'Share Auto')) + ' · JPG, PNG, PDF, etc. up to 10 MB')
+      )
+    );
+    const input = el('input', { type: 'file', id: inputId, accept: 'image/*,.pdf', style: 'display:none;' });
+    input.onchange = async () => {
+      if (!input.files || !input.files.length) return;
+      const fd = new FormData();
+      fd.append('upload_token', state.uploadToken);
+      fd.append('row_idx', String(idx));
+      fd.append('files', input.files[0]);  // single file per row
+      try {
+        showLoading('Uploading bill…');
+        const res = await api('/api/uploads', { method: 'POST', body: fd });
+        const up = (res.uploads || [])[0];
+        if (up) {
+          e.bill_pending_id = up.id;
+          e.bill_filename = up.filename;
+          renderForm();
+        }
+      } catch (err) {
+        toast(err.message || 'Upload failed', 'error');
+      } finally {
+        hideLoading();
+      }
+    };
+    wrap.appendChild(zone);
+    wrap.appendChild(input);
+    return wrap;
+  }
+
   // ===================================================================
   //  FIELD HELPERS
   // ===================================================================
@@ -1611,6 +1951,12 @@
         if (a > 0) { total = a; count = 1; }
         break;
       }
+      case 'met_dtr':
+        for (const e of (fd.entries || [])) {
+          const f = parseFloat(e.fare) || 0;
+          if (f > 0) { total += f; count++; }
+        }
+        break;
     }
     return { total: +total.toFixed(2), count };
   }
@@ -1716,17 +2062,20 @@
 
     const fail = (msg) => { ok = false; firstErr = firstErr || msg; };
 
-    // Categorization (purpose + project) — required on every form
-    if (!fd.purpose_category) {
-      fail('Please pick a Purpose: Project Visit, Site Visit, or Sales Visit.');
-    } else if (fd.purpose_category === 'sales_visit') {
-      // Sales Visit: needs either a project OR a client/prospect name
-      if (!fd.project_id && !(fd.client_name && fd.client_name.trim())) {
-        fail('For a Sales Visit, pick a project or enter the client / prospect name.');
+    // Categorization (purpose + project) — required on every form EXCEPT
+    // DTR, which has its own per-entry categorization (checked below).
+    if (F !== 'met_dtr') {
+      if (!fd.purpose_category) {
+        fail('Please pick a Purpose: Project Visit, Site Visit, or Sales Visit.');
+      } else if (fd.purpose_category === 'sales_visit') {
+        // Sales Visit: needs either a project OR a client/prospect name
+        if (!fd.project_id && !(fd.client_name && fd.client_name.trim())) {
+          fail('For a Sales Visit, pick a project or enter the client / prospect name.');
+        }
+      } else {
+        // Project Visit / Site Visit: project required
+        if (!fd.project_id) fail('Please select a Project for this visit.');
       }
-    } else {
-      // Project Visit / Site Visit: project required
-      if (!fd.project_id) fail('Please select a Project for this visit.');
     }
 
     if (F === 'bsc_conveyance' || F === 'met_local') {
@@ -1776,6 +2125,32 @@
     } else if (F === 'met_accommodation') {
       if (!fd.period) fail('Reporting month is required.');
       if (!fd.entries.some(e => e.date && e.location && parseFloat(e.amount) > 0)) fail('Add at least one complete accommodation entry.');
+    } else if (F === 'met_dtr') {
+      if (!fd.period) fail('Reimbursement month is required.');
+      else if (!Array.isArray(fd.entries) || !fd.entries.length) fail('Add at least one daily travel entry.');
+      else {
+        for (let i = 0; i < fd.entries.length; i++) {
+          const e = fd.entries[i];
+          const lbl = `Entry #${i + 1}`;
+          if (!e.date)                          { fail(`${lbl}: date is required.`); break; }
+          if (!e.mode)                          { fail(`${lbl}: pick a mode of commute.`); break; }
+          if (!e.from || !e.from.trim())        { fail(`${lbl}: From location is required.`); break; }
+          if (!e.to || !e.to.trim())            { fail(`${lbl}: To location is required.`); break; }
+          if (!(parseFloat(e.fare) > 0))        { fail(`${lbl}: fare must be greater than zero.`); break; }
+          if (!e.purpose_category)              { fail(`${lbl}: pick a Purpose.`); break; }
+          if (e.purpose_category === 'sales_visit') {
+            if (!e.project_id && !(e.client_name && e.client_name.trim())) {
+              fail(`${lbl}: pick a project or enter the client / prospect name.`); break;
+            }
+          } else if (!e.project_id) {
+            fail(`${lbl}: select a Project.`); break;
+          }
+          if (e.mode !== 'bus' && !e.bill_pending_id) {
+            const modeName = e.mode === 'bike_taxi' ? 'Bike Taxi' : (e.mode === 'auto' ? 'Auto' : 'Share Auto');
+            fail(`${lbl}: a bill is required for ${modeName}.`); break;
+          }
+        }
+      }
     }
 
     if (!ok) toast(firstErr, 'error');
@@ -1829,8 +2204,9 @@
     }
     root.appendChild(info);
 
-    // Purpose & Project strip (matches the same band that goes into the PDF)
-    {
+    // Purpose & Project strip (matches the same band that goes into the PDF).
+    // DTR has per-entry purpose/project, so the strip is omitted there.
+    if (F !== 'met_dtr') {
       const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit' };
       const purposeText = PURPOSE_NAMES[fd.purpose_category] || '—';
       let projectText = '—';
@@ -1855,6 +2231,7 @@
       case 'met_cab': renderCabPreview(root, fd); break;
       case 'met_misc': renderMiscPreview(root, fd); break;
       case 'met_advance': renderAdvancePreview(root, fd); break;
+      case 'met_dtr': renderDtrPreview(root, fd); break;
       case 'met_accommodation': renderAccommodationPreview(root, fd); break;
     }
 
@@ -2053,6 +2430,64 @@
     }
     table.appendChild(tbody);
     section.appendChild(table);
+    root.appendChild(section);
+  }
+
+  function renderDtrPreview(root, fd) {
+    const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
+    const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales' };
+    const projects = state.projects || [];
+    const findProject = (id) => projects.find(p => String(p.id) === String(id));
+
+    const section = el('div', { class: 'trip-section' });
+    section.appendChild(el('div', { class: 'trip-banner' },
+      el('div', { class: 'l' }, el('strong', {}, 'DAILY TRAVEL'),
+        `${(fd.entries || []).length} entries · ${fd.period || '—'}`
+      ),
+      el('div', { class: 'r' }, '')
+    ));
+
+    const table = el('table');
+    table.appendChild(el('thead', {}, el('tr', {},
+      ...['Date', 'Mode', 'From', 'To', 'Purpose', 'Project', 'Bill', 'Fare'].map(h => el('th', {}, h))
+    )));
+    const tbody = el('tbody');
+    (fd.entries || []).forEach(e => {
+      let project = '—';
+      if (e.project_id) {
+        const p = findProject(e.project_id);
+        if (p) project = p.code && p.code !== p.name ? `${p.name} (${p.code})` : p.name;
+      } else if (e.client_name) {
+        project = `${e.client_name} (Prospect)`;
+      }
+      tbody.appendChild(el('tr', {},
+        el('td', {}, formatDate(e.date)),
+        el('td', {}, MODE_LABEL[e.mode] || '—'),
+        el('td', {}, e.from || '—'),
+        el('td', {}, e.to || '—'),
+        el('td', {}, PURPOSE_LABEL[e.purpose_category] || '—'),
+        el('td', {}, project),
+        el('td', {}, e.mode === 'bus' ? '—' : (e.bill_filename ? '✓' : 'missing')),
+        el('td', { class: 'num' }, '₹ ' + fmt(parseFloat(e.fare) || 0))
+      ));
+    });
+    table.appendChild(tbody);
+    section.appendChild(table);
+
+    // Remarks below the table (only show entries that have remarks)
+    const withRemarks = (fd.entries || []).filter(e => e.remarks && e.remarks.trim());
+    if (withRemarks.length) {
+      const rWrap = el('div', { style: 'margin-top:14px;' },
+        el('div', { style: 'font-family:monospace;font-size:10px;letter-spacing:.08em;color:var(--bsg-muted);margin-bottom:6px;' }, 'REMARKS')
+      );
+      for (const e of withRemarks) {
+        rWrap.appendChild(el('div', { style: 'font-size:12px;color:var(--bsg-ink);margin-bottom:4px;' },
+          el('strong', {}, formatDate(e.date) + ' — '), e.remarks
+        ));
+      }
+      section.appendChild(rWrap);
+    }
+
     root.appendChild(section);
   }
 
@@ -2369,6 +2804,7 @@
     met_local: 'Local Travel', met_cab: 'Cab Reimbursement',
     met_accommodation: 'Accommodation', met_outstation: 'Outstation',
     met_misc: 'Miscellaneous', met_advance: 'Travel Advance',
+    met_dtr: 'Daily Travel',
     bsc_conveyance: 'Local Conveyance', bsc_expense: 'Travel Expense',
   };
   function fmtDateShort(s) {
