@@ -167,7 +167,7 @@ db.exec(`
   add('settlement_reviewed_at',  `settlement_reviewed_at TEXT`);
   add('settlement_note',         `settlement_note TEXT`);
   // Categorization columns for the dashboard (purpose + project link).
-  add('purpose_category',        `purpose_category TEXT`);   // 'project_visit' | 'site_visit' | 'sales_visit'
+  add('purpose_category',        `purpose_category TEXT`);   // 'project_visit' | 'site_visit' | 'sales_visit' | 'metfraa_office' | 'metfraa_factory'
   add('project_id',              `project_id INTEGER`);      // FK to projects.id, nullable for Sales Visits with no project
   add('client_name',             `client_name TEXT`);        // free-text alternative when no project (sales prospect)
   // Normalise any legacy 'submitted' status to 'pending'

@@ -351,6 +351,13 @@ function validateMetDtr(input, employee) {
       } else {
         return err(`${rowLbl}: pick a project or enter the client / prospect name.`);
       }
+    } else if (purpose === 'metfraa_office' || purpose === 'metfraa_factory') {
+      // Internal visit — project is optional. If they did pick one, keep it.
+      if (rawPid != null && rawPid !== '') {
+        const n = parseInt(rawPid, 10);
+        if (!Number.isFinite(n) || n <= 0) return err(`${rowLbl}: invalid project selection.`);
+        projectId = n;
+      }
     } else {
       if (rawPid == null || rawPid === '') return err(`${rowLbl}: select a Project.`);
       const n = parseInt(rawPid, 10);
@@ -418,7 +425,10 @@ const FORM_META = {
 };
 
 // Valid purpose categories — fixed list as agreed with the customer
-const PURPOSE_CATEGORIES = ['project_visit', 'site_visit', 'sales_visit'];
+const PURPOSE_CATEGORIES = ['project_visit', 'site_visit', 'sales_visit', 'metfraa_office', 'metfraa_factory'];
+// Purposes that DON'T require a project link (the destination is implicit
+// — your own office, or a sales prospect with a free-text client name).
+const PURPOSE_NO_PROJECT_REQUIRED = new Set(['sales_visit', 'metfraa_office', 'metfraa_factory']);
 
 function validate(formType, input, employee) {
   const v = VALIDATORS[formType];
@@ -455,8 +465,9 @@ function validate(formType, input, employee) {
   if (!purpose)                                return err('Purpose is required. Please pick Project Visit, Site Visit, or Sales Visit.');
   if (!PURPOSE_CATEGORIES.includes(purpose))   return err('Invalid purpose selection.');
 
-  // project_id: required for project_visit / site_visit; optional for sales_visit
-  // (sales visits may be to a prospect — use client_name instead).
+  // project_id: required for project_visit / site_visit; optional for
+  // sales_visit (use client_name for a prospect) AND for visits to
+  // Metfraa's own office/factory (the destination is implicit).
   let projectId = null;
   let clientName = null;
   const rawProjectId = input && input.project_id;
@@ -472,6 +483,13 @@ function validate(formType, input, employee) {
       clientName = rawClient.slice(0, 200);
     } else {
       return err('For a Sales Visit, pick a project or enter the client / prospect name.');
+    }
+  } else if (purpose === 'metfraa_office' || purpose === 'metfraa_factory') {
+    // Internal visit — project is optional. If they did pick one, keep it.
+    if (rawProjectId != null && rawProjectId !== '') {
+      const n = parseInt(rawProjectId, 10);
+      if (!Number.isFinite(n) || n <= 0) return err('Invalid project selection.');
+      projectId = n;
     }
   } else {
     // Project or Site Visit — project is REQUIRED

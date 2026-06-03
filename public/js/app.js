@@ -193,7 +193,7 @@
     const p = s.payload || {};
 
     // Meta grid
-    const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit' };
+    const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory' };
     const purposeText = PURPOSE_NAMES[s.purpose_category] || '—';
     let projectText = '—';
     if (s.project) projectText = s.project.code && s.project.code !== s.project.name ? `${s.project.name} (${s.project.code})` : s.project.name;
@@ -313,7 +313,7 @@
       )));
     } else if (s.form_type === 'met_dtr') {
       const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
-      const PURPOSE_LABEL = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit' };
+      const PURPOSE_LABEL = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory' };
       // Project lookup map sent down on the submission (server resolves project IDs to names)
       const projLookup = s.dtr_project_lookup || {};
       head(['Date', 'Mode', 'From → To', 'Purpose', 'Project', 'Bill', 'Fare']);
@@ -1065,7 +1065,9 @@
     purposeSel.innerHTML = '<option value="">— Select purpose —</option>'
       + '<option value="project_visit">Project Visit</option>'
       + '<option value="site_visit">Site Visit</option>'
-      + '<option value="sales_visit">Sales Visit</option>';
+      + '<option value="sales_visit">Sales Visit</option>'
+      + '<option value="metfraa_office">Visit to Metfraa - Office</option>'
+      + '<option value="metfraa_factory">Visit to Metfraa - Factory</option>';
     purposeSel.value = fd.purpose_category || '';
     purposeSel.onchange = (e) => {
       // Clear any stale project / client picks when switching purpose —
@@ -1085,12 +1087,16 @@
 
     const hasPurpose = !!fd.purpose_category;
     const isSales = fd.purpose_category === 'sales_visit';
+    const isInternal = fd.purpose_category === 'metfraa_office' || fd.purpose_category === 'metfraa_factory';
+    const projectOptional = isSales || isInternal;
 
     // Project dropdown — only show once purpose has been picked.
     if (hasPurpose) {
-      const projLabelText = isSales ? 'Project (optional for Sales Visit)' : 'Project';
+      let projLabelText = 'Project';
+      if (isSales)    projLabelText = 'Project (optional for Sales Visit)';
+      if (isInternal) projLabelText = 'Project (optional — internal visit)';
       const projField = el('div', { class: 'field' },
-        el('label', { for: 'ppProjectSel' }, projLabelText, ' ', isSales ? null : el('span', { class: 'req' }, '*'))
+        el('label', { for: 'ppProjectSel' }, projLabelText, ' ', projectOptional ? null : el('span', { class: 'req' }, '*'))
       );
       const projectSel = el('select', { id: 'ppProjectSel' });
       populateProjectOptions(projectSel);
@@ -1110,6 +1116,13 @@
       card.appendChild(el('div', {
         style: 'margin-top:10px;padding:10px 12px;background:#f6f8fa;border-radius:3px;font-size:12px;color:var(--bsg-muted);'
       }, 'Select a purpose above to choose the project.'));
+    } else if (isInternal) {
+      // Internal visit — destination is implicit (own office / factory).
+      card.appendChild(el('div', {
+        style: 'margin-top:10px;padding:10px 12px;background:rgba(37,99,235,0.06);border-radius:3px;font-size:12px;color:var(--bsg-blue);'
+      }, fd.purpose_category === 'metfraa_office'
+          ? 'Visit to Metfraa Office — project link is optional.'
+          : 'Visit to Metfraa Factory — project link is optional.'));
     } else if (isSales) {
       // For Sales Visit, also offer a Client / Prospect Name input as an
       // alternative to picking a project from the list.
@@ -1761,7 +1774,9 @@
     purposeSel.innerHTML = '<option value="">— Select purpose —</option>'
       + '<option value="project_visit">Project Visit</option>'
       + '<option value="site_visit">Site Visit</option>'
-      + '<option value="sales_visit">Sales Visit</option>';
+      + '<option value="sales_visit">Sales Visit</option>'
+      + '<option value="metfraa_office">Visit to Metfraa - Office</option>'
+      + '<option value="metfraa_factory">Visit to Metfraa - Factory</option>';
     purposeSel.value = e.purpose_category || '';
     purposeSel.onchange = (ev) => {
       const prev = e.purpose_category;
@@ -1780,6 +1795,8 @@
     // Project — only after purpose is picked
     const hasPurpose = !!e.purpose_category;
     const isSales = e.purpose_category === 'sales_visit';
+    const isInternal = e.purpose_category === 'metfraa_office' || e.purpose_category === 'metfraa_factory';
+    const projectOptional = isSales || isInternal;
     if (hasPurpose) {
       const projSel = el('select');
       populateProjectOptions(projSel);
@@ -1788,8 +1805,11 @@
         e.project_id = ev.target.value;
         if (ev.target.value) e.client_name = '';
       };
+      let projLabelText = 'Project';
+      if (isSales)    projLabelText = 'Project (optional)';
+      if (isInternal) projLabelText = 'Project (optional)';
       grid.appendChild(el('div', { class: 'field' },
-        el('label', {}, 'Project ', isSales ? null : el('span', { class: 'req' }, '*')),
+        el('label', {}, projLabelText, ' ', projectOptional ? null : el('span', { class: 'req' }, '*')),
         projSel
       ));
     }
@@ -1800,6 +1820,12 @@
       wrap.appendChild(el('div', {
         style: 'margin-top:8px;padding:8px 10px;background:#f6f8fa;border-radius:3px;font-size:11px;color:var(--bsg-muted);'
       }, 'Select a purpose above to pick the project.'));
+    } else if (isInternal) {
+      wrap.appendChild(el('div', {
+        style: 'margin-top:8px;padding:8px 10px;background:rgba(37,99,235,0.06);border-radius:3px;font-size:11px;color:var(--bsg-blue);'
+      }, e.purpose_category === 'metfraa_office'
+          ? 'Visit to Metfraa Office — project link is optional.'
+          : 'Visit to Metfraa Factory — project link is optional.'));
     } else if (isSales) {
       const ip = el('input', { type: 'text', placeholder: 'e.g. ABC Corp', class: 'ti' });
       ip.value = e.client_name || '';
@@ -2066,12 +2092,14 @@
     // DTR, which has its own per-entry categorization (checked below).
     if (F !== 'met_dtr') {
       if (!fd.purpose_category) {
-        fail('Please pick a Purpose: Project Visit, Site Visit, or Sales Visit.');
+        fail('Please pick a Purpose.');
       } else if (fd.purpose_category === 'sales_visit') {
         // Sales Visit: needs either a project OR a client/prospect name
         if (!fd.project_id && !(fd.client_name && fd.client_name.trim())) {
           fail('For a Sales Visit, pick a project or enter the client / prospect name.');
         }
+      } else if (fd.purpose_category === 'metfraa_office' || fd.purpose_category === 'metfraa_factory') {
+        // Internal visit — no project / client required
       } else {
         // Project Visit / Site Visit: project required
         if (!fd.project_id) fail('Please select a Project for this visit.');
@@ -2142,6 +2170,8 @@
             if (!e.project_id && !(e.client_name && e.client_name.trim())) {
               fail(`${lbl}: pick a project or enter the client / prospect name.`); break;
             }
+          } else if (e.purpose_category === 'metfraa_office' || e.purpose_category === 'metfraa_factory') {
+            // Internal visit — no project / client required
           } else if (!e.project_id) {
             fail(`${lbl}: select a Project.`); break;
           }
@@ -2207,7 +2237,7 @@
     // Purpose & Project strip (matches the same band that goes into the PDF).
     // DTR has per-entry purpose/project, so the strip is omitted there.
     if (F !== 'met_dtr') {
-      const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit' };
+      const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory' };
       const purposeText = PURPOSE_NAMES[fd.purpose_category] || '—';
       let projectText = '—';
       if (fd.project_id) {
@@ -2435,7 +2465,7 @@
 
   function renderDtrPreview(root, fd) {
     const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
-    const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales' };
+    const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales', metfraa_office: 'M. Office', metfraa_factory: 'M. Factory' };
     const projects = state.projects || [];
     const findProject = (id) => projects.find(p => String(p.id) === String(id));
 
