@@ -425,7 +425,7 @@ const FORM_META = {
 };
 
 // Valid purpose categories — fixed list as agreed with the customer
-const PURPOSE_CATEGORIES = ['project_visit', 'site_visit', 'sales_visit', 'metfraa_office', 'metfraa_factory'];
+const PURPOSE_CATEGORIES = ['project_visit', 'site_visit', 'sales_visit', 'metfraa_office', 'metfraa_factory', 'purchase_visit'];
 // Purposes that DON'T require a project link (the destination is implicit
 // — your own office, or a sales prospect with a free-text client name).
 const PURPOSE_NO_PROJECT_REQUIRED = new Set(['sales_visit', 'metfraa_office', 'metfraa_factory']);

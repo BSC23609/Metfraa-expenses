@@ -193,7 +193,7 @@
     const p = s.payload || {};
 
     // Meta grid
-    const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory' };
+    const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory', purchase_visit: 'Purchase Visit' };
     const purposeText = PURPOSE_NAMES[s.purpose_category] || '—';
     let projectText = '—';
     if (s.project) projectText = s.project.code && s.project.code !== s.project.name ? `${s.project.name} (${s.project.code})` : s.project.name;
@@ -313,7 +313,7 @@
       )));
     } else if (s.form_type === 'met_dtr') {
       const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
-      const PURPOSE_LABEL = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory' };
+      const PURPOSE_LABEL = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory', purchase_visit: 'Purchase Visit' };
       // Project lookup map sent down on the submission (server resolves project IDs to names)
       const projLookup = s.dtr_project_lookup || {};
       head(['Date', 'Mode', 'From → To', 'Purpose', 'Project', 'Bill', 'Fare']);
@@ -1067,7 +1067,7 @@
       + '<option value="site_visit">Site Visit</option>'
       + '<option value="sales_visit">Sales Visit</option>'
       + '<option value="metfraa_office">Visit to Metfraa - Office</option>'
-      + '<option value="metfraa_factory">Visit to Metfraa - Factory</option>';
+      + '<option value="metfraa_factory">Visit to Metfraa - Factory</option>' + '<option value="purchase_visit">Purchase Visit</option>';
     purposeSel.value = fd.purpose_category || '';
     purposeSel.onchange = (e) => {
       // Clear any stale project / client picks when switching purpose —
@@ -1776,7 +1776,7 @@
       + '<option value="site_visit">Site Visit</option>'
       + '<option value="sales_visit">Sales Visit</option>'
       + '<option value="metfraa_office">Visit to Metfraa - Office</option>'
-      + '<option value="metfraa_factory">Visit to Metfraa - Factory</option>';
+      + '<option value="metfraa_factory">Visit to Metfraa - Factory</option>' + '<option value="purchase_visit">Purchase Visit</option>';
     purposeSel.value = e.purpose_category || '';
     purposeSel.onchange = (ev) => {
       const prev = e.purpose_category;
@@ -2237,7 +2237,7 @@
     // Purpose & Project strip (matches the same band that goes into the PDF).
     // DTR has per-entry purpose/project, so the strip is omitted there.
     if (F !== 'met_dtr') {
-      const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory' };
+      const PURPOSE_NAMES = { project_visit: 'Project Visit', site_visit: 'Site Visit', sales_visit: 'Sales Visit', metfraa_office: 'Visit to Metfraa - Office', metfraa_factory: 'Visit to Metfraa - Factory', purchase_visit: 'Purchase Visit' };
       const purposeText = PURPOSE_NAMES[fd.purpose_category] || '—';
       let projectText = '—';
       if (fd.project_id) {
@@ -2465,7 +2465,7 @@
 
   function renderDtrPreview(root, fd) {
     const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
-    const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales', metfraa_office: 'M. Office', metfraa_factory: 'M. Factory' };
+    const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales', metfraa_office: 'M. Office', metfraa_factory: 'M. Factory', purchase_visit: 'Purchase' };
     const projects = state.projects || [];
     const findProject = (id) => projects.find(p => String(p.id) === String(id));
 

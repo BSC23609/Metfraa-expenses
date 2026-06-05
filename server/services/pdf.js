@@ -193,6 +193,7 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
           sales_visit:      'Sales Visit',
           metfraa_office:   'Visit to Metfraa - Office',
           metfraa_factory:  'Visit to Metfraa - Factory',
+          purchase_visit:   'Purchase Visit',
         };
         const purposeText = PURPOSE_NAMES[submission.purpose_category] || '—';
         const projectText = submission.project
@@ -497,7 +498,7 @@ function renderMetMisc(doc, p) {
 //   each entry that had a bill, we show "Bill ✓" in the table.
 function renderMetDtr(doc, p, sub) {
   const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
-  const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales', metfraa_office: 'M. Office', metfraa_factory: 'M. Factory' };
+  const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales', metfraa_office: 'M. Office', metfraa_factory: 'M. Factory', purchase_visit: 'Purchase' };
   const lookup = (sub && sub.project_lookup) || {};
   const entries = Array.isArray(p.entries) ? p.entries : [];
 
