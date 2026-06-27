@@ -2929,6 +2929,37 @@
         ).join('');
   }
 
+  // Build the period (month) filter dropdown from the period values that
+  // actually appear in the data. Newest first. Submissions without a
+  // period get bucketed under a "no-period" sentinel option at the end,
+  // so they remain reachable when HR filters.
+  function populatePeriodFilter(selectEl, rows) {
+    if (!selectEl) return;
+    const current = selectEl.value;
+    const periods = new Set();
+    let hasNoPeriod = false;
+    for (const r of rows) {
+      if (r.period) periods.add(r.period);
+      else hasNoPeriod = true;
+    }
+    // Sort YYYY-MM strings descending so newest months are at the top.
+    const sorted = Array.from(periods).sort((a, b) => b.localeCompare(a));
+    const monthLabel = (p) => {
+      // 'YYYY-MM' → 'Aug 2026'. Anything else (e.g. free-form periods on
+      // older data) gets passed through unchanged.
+      const m = /^(\d{4})-(\d{2})$/.exec(p);
+      if (!m) return p;
+      const d = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, 1);
+      return isNaN(d) ? p : d.toLocaleString('en-IN', { month: 'short', year: 'numeric' });
+    };
+    let html = '<option value="">All months</option>'
+      + sorted.map(p => `<option value="${p}"${p === current ? ' selected' : ''}>${monthLabel(p)}</option>`).join('');
+    if (hasNoPeriod) {
+      html += `<option value="__none__"${current === '__none__' ? ' selected' : ''}>(No month)</option>`;
+    }
+    selectEl.innerHTML = html;
+  }
+
   // Renders the row of action buttons for a submission inside a folder.
   function renderRowActions(s) {
     const isSettlement = s.status === 'settlement_pending';
@@ -3021,18 +3052,26 @@
     if (!root) return;
     const all = state.adminPending || [];
     populateFormFilter($('#pendFormFilter'), all);
+    populatePeriodFilter($('#pendPeriodFilter'), all);
 
     const q = ($('#pendSearch') ? $('#pendSearch').value : '').toLowerCase().trim();
     const formFilter = ($('#pendFormFilter') ? $('#pendFormFilter').value : '');
+    const periodFilter = ($('#pendPeriodFilter') ? $('#pendPeriodFilter').value : '');
 
     // Two passes: textual search filter applies to the WHOLE folder
-    // (any field match keeps the row), form-type filter applies WITHIN
-    // a folder (other rows still count toward the parent total).
+    // (any field match keeps the row), form-type/period filters apply
+    // WITHIN a folder (other rows still count toward the parent total).
     const textMatch = (s) => {
       if (!q) return true;
       return [s.employee_name, s.employee_email, s.reference, s.form_type, s.period].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
     };
     const formMatch = (s) => !formFilter || s.form_type === formFilter;
+    const periodMatch = (s) => {
+      if (!periodFilter) return true;
+      if (periodFilter === '__none__') return !s.period;
+      return s.period === periodFilter;
+    };
+    const rowMatches = (s) => formMatch(s) && periodMatch(s);
 
     const filtered = all.filter(textMatch);
     const buckets = groupByEmployee(filtered);
@@ -3043,7 +3082,7 @@
       root.appendChild(el('div', { class: 'empty-state' }, q ? 'No matches.' : 'Nothing pending.'));
     } else {
       for (const b of buckets) {
-        const matching = b.subs.filter(formMatch);
+        const matching = b.subs.filter(rowMatches);
         totalMatching += matching.length;
         root.appendChild(buildEmployeeFolder({
           tabKey: 'pend', bucket: b,
@@ -3052,7 +3091,8 @@
         }));
       }
     }
-    $('#pendCount').textContent = formFilter
+    const isFiltered = !!(formFilter || periodFilter);
+    $('#pendCount').textContent = isFiltered
       ? `${totalMatching} pending · filtered`
       : `${all.length} pending across ${buckets.length} ${buckets.length === 1 ? 'employee' : 'employees'}`;
   }
@@ -3071,15 +3111,23 @@
     if (!root) return;
     const all = state.adminSubmissions || [];
     populateFormFilter($('#subFormFilter'), all);
+    populatePeriodFilter($('#subPeriodFilter'), all);
 
     const q = ($('#subSearch') ? $('#subSearch').value : '').toLowerCase().trim();
     const formFilter = ($('#subFormFilter') ? $('#subFormFilter').value : '');
+    const periodFilter = ($('#subPeriodFilter') ? $('#subPeriodFilter').value : '');
 
     const textMatch = (s) => {
       if (!q) return true;
       return [s.employee_name, s.employee_email, s.reference, s.status, s.form_type, s.period].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
     };
     const formMatch = (s) => !formFilter || s.form_type === formFilter;
+    const periodMatch = (s) => {
+      if (!periodFilter) return true;
+      if (periodFilter === '__none__') return !s.period;
+      return s.period === periodFilter;
+    };
+    const rowMatches = (s) => formMatch(s) && periodMatch(s);
 
     const filtered = all.filter(textMatch);
     const buckets = groupByEmployee(filtered);
@@ -3090,7 +3138,7 @@
       root.appendChild(el('div', { class: 'empty-state' }, q ? 'No matches.' : 'No submissions yet.'));
     } else {
       for (const b of buckets) {
-        const matching = b.subs.filter(formMatch);
+        const matching = b.subs.filter(rowMatches);
         totalMatching += matching.length;
         root.appendChild(buildEmployeeFolder({
           tabKey: 'sub', bucket: b,
@@ -3099,7 +3147,8 @@
         }));
       }
     }
-    $('#subCount').textContent = formFilter
+    const isFiltered = !!(formFilter || periodFilter);
+    $('#subCount').textContent = isFiltered
       ? `${totalMatching} shown · filtered`
       : `${all.length} across ${buckets.length} ${buckets.length === 1 ? 'employee' : 'employees'}`;
   }
@@ -3740,10 +3789,12 @@
   // Pending + Submissions search / filter
   $('#pendSearch') && $('#pendSearch').addEventListener('input', drawPendingTable);
   $('#pendFormFilter') && $('#pendFormFilter').addEventListener('change', drawPendingTable);
+  $('#pendPeriodFilter') && $('#pendPeriodFilter').addEventListener('change', drawPendingTable);
   $('#pendExpandAll')  && $('#pendExpandAll').addEventListener('click',  () => setAllFolders('pend', true));
   $('#pendCollapseAll')&& $('#pendCollapseAll').addEventListener('click', () => setAllFolders('pend', false));
   $('#subSearch') && $('#subSearch').addEventListener('input', drawSubmissionsTable);
   $('#subFormFilter') && $('#subFormFilter').addEventListener('change', drawSubmissionsTable);
+  $('#subPeriodFilter') && $('#subPeriodFilter').addEventListener('change', drawSubmissionsTable);
   $('#subStatusFilter') && $('#subStatusFilter').addEventListener('change', async () => { await loadSubmissions(); drawSubmissionsTable(); });
   $('#subExpandAll')   && $('#subExpandAll').addEventListener('click',  () => setAllFolders('sub', true));
   $('#subCollapseAll') && $('#subCollapseAll').addEventListener('click', () => setAllFolders('sub', false));
