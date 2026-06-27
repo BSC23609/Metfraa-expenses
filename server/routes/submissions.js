@@ -195,6 +195,236 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
+// ====================================================================
+//  PATCH /api/submissions/:id  — edit a returned-for-edit draft + resubmit
+// ====================================================================
+//  Only the OWNER of the submission can edit, and only while it sits in
+//  status='draft' (i.e. HR rejected it and returned it for changes).
+//  Behaviour mirrors the submit handler, except:
+//    - the row is UPDATEd in place (same id + reference, new payload)
+//    - all attachments are wiped and re-linked from the pending uploads
+//    - status flips back to 'pending' and the snapshot is regenerated
+//    - audit row records RESUBMIT with the original ref
+// ====================================================================
+// ====================================================================
+//  POST /api/submissions/:id/clone-attachments — entry point for editing
+// ====================================================================
+//  Called by the client when the employee opens a draft for edit. It
+//  copies the submission's existing attachments INTO the pending-uploads
+//  pool under a fresh upload_token, so the edit screen can render them
+//  with × buttons (employee can remove if they want) and the resubmit
+//  PATCH then sees the full new attachment set via the normal pending
+//  uploads flow.
+//
+//  Files on disk are NOT duplicated — pending rows point at the same
+//  stored_path. That's safe because the resubmit PATCH replaces (not
+//  deletes) the attachment rows; the underlying files survive.
+//
+//  Body: { upload_token: string }
+// ====================================================================
+router.post('/:id/clone-attachments', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid id' });
+    const existing = stmts.getSubmission.get(id);
+    if (!existing) return res.status(404).json({ error: 'Submission not found.' });
+    if (existing.employee_id !== req.user.id) return res.status(403).json({ error: 'Forbidden.' });
+    if (existing.status !== 'draft') return res.status(400).json({ error: `Cannot clone attachments from '${existing.status}' status.` });
+
+    const upload_token = (req.body && req.body.upload_token || '').trim();
+    if (!upload_token) return res.status(400).json({ error: 'upload_token required' });
+
+    const attachments = stmts.listAttachments.all(id);
+    const cloned = [];
+    for (const a of attachments) {
+      const info = stmts.insertPendingUpload.run({
+        upload_token,
+        employee_id: req.user.id,
+        filename: a.filename,
+        stored_path: a.stored_path,
+        mime_type: a.mime_type,
+        size_bytes: a.size_bytes,
+        row_idx: a.row_idx == null ? null : a.row_idx,
+      });
+      cloned.push({
+        id: info.lastInsertRowid,
+        original_attachment_id: a.id,
+        filename: a.filename,
+        mime_type: a.mime_type,
+        size_bytes: a.size_bytes,
+        row_idx: a.row_idx,
+      });
+    }
+    res.json({ ok: true, uploads: cloned });
+  } catch (err) {
+    console.error('[clone-attachments]', err);
+    res.status(500).json({ error: err.message || 'Clone failed' });
+  }
+});
+
+// ====================================================================
+//  PATCH /api/submissions/:id  — edit a returned-for-edit draft + resubmit
+// ====================================================================
+//  Only the OWNER of the submission can edit, and only while it sits in
+//  status='draft' (i.e. HR rejected it and returned it for changes).
+//  Behaviour mirrors the submit handler, except:
+//    - the row is UPDATEd in place (same id + reference, new payload)
+//    - all attachments are wiped and re-linked from the pending uploads
+//    - status flips back to 'pending' and the snapshot is regenerated
+//    - audit row records RESUBMIT with the original ref
+// ====================================================================
+router.patch('/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid id' });
+
+    const existing = stmts.getSubmission.get(id);
+    if (!existing) return res.status(404).json({ error: 'Submission not found.' });
+    if (existing.employee_id !== req.user.id) {
+      return res.status(403).json({ error: 'You can only edit your own submissions.' });
+    }
+    if (existing.status !== 'draft') {
+      return res.status(400).json({
+        error: existing.status === 'pending'
+          ? 'This submission is awaiting review and cannot be edited.'
+          : `Submissions in status '${existing.status}' cannot be edited.`,
+      });
+    }
+
+    const { form_type, upload_token, payload } = req.body || {};
+    if (!form_type) return res.status(400).json({ error: 'form_type required' });
+    // Form type cannot change on a resubmit — it's the same conceptual entry
+    if (form_type !== existing.form_type) {
+      return res.status(400).json({ error: 'Cannot change the form type on a resubmit.' });
+    }
+    const meta = FORM_META[form_type];
+    if (!meta) return res.status(400).json({ error: 'Unknown form type' });
+
+    // 1) Validate the payload (same as submit)
+    const v = validate(form_type, payload || {}, req.user);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+
+    // 2) Build attachments from pending uploads — same per-row logic as submit
+    const pending = upload_token ? stmts.listPendingByToken.all(upload_token, req.user.id) : [];
+    console.log(`[resubmit] user=${req.user.email} sub=${id} ref=${existing.reference} token=${upload_token} new-bills=${pending.length}`);
+
+    let attachments;
+    if (form_type === 'met_dtr') {
+      const pendingById = new Map(pending.map(p => [p.id, p]));
+      const claimed = new Set();
+      attachments = [];
+      const entries = (v.payload && Array.isArray(v.payload.entries)) ? v.payload.entries : [];
+      for (let i = 0; i < entries.length; i++) {
+        const billId = entries[i].bill_pending_id;
+        if (billId == null) continue;
+        const p = pendingById.get(billId);
+        if (!p) return res.status(400).json({ error: `Entry #${i + 1} references a bill that wasn't uploaded under this submission.` });
+        if (claimed.has(billId)) {
+          return res.status(400).json({ error: `Entry #${i + 1} references a bill already used by another entry — upload a separate file.` });
+        }
+        claimed.add(billId);
+        attachments.push({
+          filename: p.filename, stored_path: p.stored_path,
+          mime_type: p.mime_type, size_bytes: p.size_bytes,
+          category: 'dtr_bill', label: `Entry ${i + 1}`,
+          row_idx: i,
+        });
+      }
+      v.payload.entries = entries.map(e => { const c = { ...e }; delete c.bill_pending_id; return c; });
+    } else {
+      attachments = pending.map(p => ({
+        filename: p.filename, stored_path: p.stored_path,
+        mime_type: p.mime_type, size_bytes: p.size_bytes,
+        category: 'general', label: '', row_idx: null,
+      }));
+    }
+
+    // 3) Categorization — same defence-in-depth project validation as submit
+    const purposeCategory = v.meta && v.meta.purpose_category ? v.meta.purpose_category : null;
+    let projectId   = v.meta && v.meta.project_id != null ? v.meta.project_id : null;
+    const clientName  = v.meta && v.meta.client_name ? v.meta.client_name : null;
+    if (projectId != null) {
+      const proj = stmts.getProject.get(projectId);
+      if (!proj || !proj.is_active) {
+        return res.status(400).json({ error: 'Selected project is not valid. Please pick from the active list.' });
+      }
+    }
+
+    // 4) Atomically: clear old attachments, update the row, insert new attachments
+    const tx = db.transaction(() => {
+      stmts.deleteAttachmentsForSubmission.run(id);
+      stmts.resubmitFromDraft.run({
+        id,
+        payload_json: JSON.stringify(v.payload),
+        total_amount: v.total,
+        purpose_category: purposeCategory,
+        project_id: projectId,
+        client_name: clientName,
+      });
+      for (const a of attachments) {
+        stmts.insertAttachment.run({
+          submission_id: id,
+          filename: a.filename, stored_path: a.stored_path,
+          mime_type: a.mime_type, size_bytes: a.size_bytes,
+          category: a.category, label: a.label,
+          row_idx: a.row_idx == null ? null : a.row_idx,
+        });
+      }
+    });
+    tx();
+
+    // 5) Clean up pending uploads
+    if (upload_token) {
+      try { stmts.deletePendingByToken.run(upload_token); } catch (_) {}
+    }
+
+    // 6) Regenerate snapshot + mirror to OneDrive (same as submit)
+    const linkedAttachments = stmts.listAttachments.all(id);
+    const fullSubmission = stmts.getSubmission.get(id);
+    let draftReportPath = null;
+    try {
+      draftReportPath = await buildReportPdf(fullSubmission, { draft: true });
+    } catch (e) {
+      console.error('[resubmit-draft-report]', e);
+    }
+    let sync = { synced: false };
+    try {
+      sync = await syncSvc.onSubmit(fullSubmission, {
+        name: req.user.name, email: req.user.email,
+        employee_code: req.user.employee_code, level: req.user.level,
+        designation: req.user.designation, department: req.user.department,
+      }, linkedAttachments, draftReportPath);
+    } catch (e) {
+      console.error('[sync.onSubmit-resubmit]', e);
+    }
+
+    // 7) Audit
+    stmts.insertAudit.run({
+      actor_email: req.user.email,
+      action: 'RESUBMIT',
+      target_type: 'submission',
+      target_id: id,
+      meta_json: JSON.stringify({ form_type, total: v.total, ref: existing.reference, od_synced: sync.synced }),
+      ip_address: req.ip,
+    });
+
+    res.json({
+      ok: true,
+      submission: {
+        id,
+        reference: existing.reference,
+        total: v.total,
+        status: 'pending',
+        od_synced: sync.synced,
+        message: 'Resubmitted for approval.',
+      },
+    });
+  } catch (err) {
+    console.error('[resubmit]', err);
+    res.status(500).json({ error: err.message || 'Resubmit failed' });
+  }
+});
+
 // GET /api/submissions — list current user's submissions
 router.get('/', requireAuth, (req, res) => {
   const rows = stmts.listSubmissionsForEmployee.all(req.user.id);
@@ -393,6 +623,8 @@ router.get('/:id', requireAuth, (req, res) => {
       form_type: sub.form_type, period: sub.period, total_amount: sub.total_amount,
       status: sub.status, submitted_at: sub.submitted_at, email_sent_at: sub.email_sent_at,
       reviewed_by: sub.reviewed_by, reviewed_at: sub.reviewed_at, review_note: sub.review_note,
+      // Reject-to-draft fields — set when HR has returned this for edit
+      changes_required: sub.changes_required, returned_at: sub.returned_at,
       // Categorization
       purpose_category: sub.purpose_category,
       project: project ? { id: project.id, code: project.code, name: project.name } : null,

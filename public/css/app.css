@@ -1707,6 +1707,7 @@ body::after {
 .status-pill.pending  { background: rgba(180,83,9,0.12);  color: var(--bsg-warning); }
 .status-pill.approved { background: rgba(5,150,105,0.12);  color: var(--bsg-success); }
 .status-pill.rejected { background: rgba(220,38,38,0.12);  color: var(--bsg-danger); }
+.status-pill.draft    { background: rgba(217,119,6,0.18);  color: #b45309; }
 .status-pill.advance_approved    { background: rgba(37,99,235,0.12);  color: var(--bsg-blue); }
 .status-pill.settlement_pending  { background: rgba(180,83,9,0.16);   color: var(--bsg-warning); }
 .status-pill.settled             { background: rgba(5,150,105,0.16);  color: var(--bsg-success); }
@@ -2017,3 +2018,41 @@ body::after {
   font-size: 18px; cursor: pointer; padding: 0 6px;
 }
 .dtr-bill-attached .remove:hover { color: var(--bsg-danger); }
+
+/* ---- "Action required" hub card (returned-for-edit drafts) ---------- */
+.option-card.drafts-card {
+  border-left: 4px solid #d97706;
+  background: linear-gradient(to right, rgba(217,119,6,0.04), transparent 40%);
+}
+.option-card.drafts-card:hover {
+  background: linear-gradient(to right, rgba(217,119,6,0.08), transparent 50%);
+}
+.drafts-icon { color: #d97706; }
+.card-badge.drafts-badge {
+  background: #d97706; color: #fff;
+  padding: 2px 9px; border-radius: 10px; font-size: 11px;
+  margin-left: 8px; font-weight: 700;
+}
+
+/* What-needs-to-change banner on the draft itself */
+.draft-banner {
+  background: #fef3c7;
+  border-left: 4px solid #d97706;
+  border-radius: 4px;
+  padding: 14px 18px;
+  margin: 0 0 18px;
+}
+.draft-banner .dbl {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: #92400e;
+  margin-bottom: 6px; font-weight: 600;
+}
+.draft-banner .dbm {
+  font-size: 14px; color: var(--bsg-ink);
+  line-height: 1.55; white-space: pre-wrap;
+}
+.draft-banner .dbs {
+  font-size: 11px; color: #92400e;
+  margin-top: 8px;
+}

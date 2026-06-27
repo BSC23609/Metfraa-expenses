@@ -131,31 +131,60 @@
 
   // Like confirmModal, but with a free-text input. Resolves to the entered
   // string (possibly empty) on confirm, or null on cancel.
-  function promptModal({ title, body, placeholder = '', confirmText = 'Confirm' }) {
+  function promptModal({ title, body, placeholder = '', confirmText = 'Confirm', required = false, textarea = false }) {
     return new Promise(resolve => {
       $('#modalTitle').textContent = title;
       $('#modalBody').textContent = body;
       const r = $('#modalRecipient');
       r.style.display = 'block';
       r.innerHTML = '';
-      const input = el('input', {
-        type: 'text', placeholder,
-        style: 'width:100%;font-family:Inter,sans-serif;font-size:14px;padding:11px 14px;border:1px solid var(--bsg-line);border-radius:3px;background:#fff;',
-      });
+      // Use a textarea for long-form responses (e.g. "what needs to change"
+      // explanations from HR) — required reasons usually run multiple lines.
+      const useTextarea = textarea || required;
+      const input = useTextarea
+        ? el('textarea', {
+            placeholder, rows: 3,
+            style: 'width:100%;font-family:Inter,sans-serif;font-size:14px;padding:11px 14px;border:1px solid var(--bsg-line);border-radius:3px;background:#fff;resize:vertical;min-height:80px;',
+          })
+        : el('input', {
+            type: 'text', placeholder,
+            style: 'width:100%;font-family:Inter,sans-serif;font-size:14px;padding:11px 14px;border:1px solid var(--bsg-line);border-radius:3px;background:#fff;',
+          });
       r.appendChild(input);
       $('#modalConfirm').textContent = confirmText;
+      const confirmBtn = $('#modalConfirm');
+      // For 'required' fields, keep the confirm button disabled until the
+      // user types something so the form can't be submitted blank.
+      if (required) {
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = '0.55';
+        confirmBtn.style.cursor = 'not-allowed';
+        input.oninput = () => {
+          const ok = !!input.value.trim();
+          confirmBtn.disabled = !ok;
+          confirmBtn.style.opacity = ok ? '' : '0.55';
+          confirmBtn.style.cursor = ok ? '' : 'not-allowed';
+        };
+      }
       const bk = $('#modalBackdrop');
       bk.classList.add('show');
       setTimeout(() => input.focus(), 50);
       const done = (v) => {
         bk.classList.remove('show');
-        $('#modalConfirm').onclick = null;
+        confirmBtn.onclick = null;
         $('#modalCancel').onclick  = null;
+        confirmBtn.disabled = false;
+        confirmBtn.style.opacity = '';
+        confirmBtn.style.cursor = '';
         r.innerHTML = '';
         r.style.display = 'none';
         resolve(v);
       };
-      $('#modalConfirm').onclick = () => done(input.value.trim());
+      confirmBtn.onclick = () => {
+        const v = input.value.trim();
+        if (required && !v) { input.focus(); return; }
+        done(v);
+      };
       $('#modalCancel').onclick  = () => done(null);
     });
   }
@@ -172,7 +201,7 @@
       $('#viewRef').textContent = s.reference;
       $('#viewTitle').textContent = FORM_LABEL[s.form_type] || s.form_type;
       const pill = $('#viewStatus');
-      pill.textContent = s.status;
+      pill.textContent = statusLabel(s.status);
       pill.className = 'status-pill ' + s.status;
       $('#viewBody').innerHTML = '';
       $('#viewBody').appendChild(renderSubmissionDetail(s));
@@ -207,13 +236,37 @@
       detailRow('Project', projectText),
       detailRow('Period', p.period || s.period),
       detailRow('Submitted', fmtDateShort(s.submitted_at)),
-      detailRow('Status', s.status.charAt(0).toUpperCase() + s.status.slice(1)),
+      detailRow('Status', statusLabel(s.status).replace(/^./, c => c.toUpperCase())),
     );
     wrap.appendChild(meta);
+
+    // If HR has sent this back for edits, surface the message + an
+    // action button right under the meta grid so the owner can fix it.
+    if (s.status === 'draft' && s.changes_required) {
+      const ownsIt = state.user && s.employee && s.employee.email && state.user.email
+        && s.employee.email.toLowerCase() === state.user.email.toLowerCase();
+      const banner = el('div', { class: 'draft-banner', style: 'margin: 16px 0;' },
+        el('div', { class: 'dbl' }, 'What needs to change'),
+        el('div', { class: 'dbm' }, s.changes_required),
+        el('div', { class: 'dbs' },
+          `Sent back by ${s.reviewed_by || 'HR'}`,
+          s.returned_at ? ' · ' + new Date(s.returned_at.replace(' ', 'T') + (s.returned_at.endsWith('Z') ? '' : 'Z')).toLocaleString('en-IN') : ''
+        )
+      );
+      if (ownsIt) {
+        banner.appendChild(el('button', {
+          class: 'btn',
+          style: 'margin-top:10px;background:#d97706;color:#fff;border:0;padding:9px 18px;border-radius:3px;font-weight:600;font-size:13px;cursor:pointer;',
+          onclick: () => { $('#viewBackdrop').classList.remove('show'); openDraftForEdit(s.id); },
+        }, 'Edit & Resubmit →'));
+      }
+      wrap.appendChild(banner);
+    }
+
     if (s.reviewed_by) {
       const reviewedLabel = s.form_type === 'met_advance'
         ? (s.status === 'rejected' ? 'Rejected' : 'Advance approved')
-        : (s.status === 'approved' ? 'Approved' : 'Reviewed');
+        : (s.status === 'approved' ? 'Approved' : (s.status === 'draft' ? 'Sent back for edits' : 'Reviewed'));
       wrap.appendChild(el('div', { class: 'vd-review' },
         `${reviewedLabel} by ${s.reviewed_by}${s.reviewed_at ? ' · ' + fmtDateShort(s.reviewed_at) : ''}${s.review_note ? ' · "' + s.review_note + '"' : ''}`
       ));
@@ -541,22 +594,33 @@
     try {
       const res = await api('/api/submissions');
       const rows = res.submissions || [];
+      // Keep the drafts cache in sync so the hub badge reflects reality
+      state.draftSubmissions = rows.filter(s => s.status === 'draft');
       tbody.innerHTML = '';
       if (!rows.length) {
         tbody.appendChild(el('tr', {}, el('td', { colspan: 7, style: 'text-align:center;color:var(--bsg-muted);padding:32px;' }, 'No submissions yet.')));
         return;
       }
       for (const s of rows) {
-        tbody.appendChild(el('tr', {},
+        const isDraft = s.status === 'draft';
+        const actions = el('div', { class: 'admin-actions' },
+          el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View')
+        );
+        if (isDraft) {
+          actions.appendChild(el('button', {
+            class: 'approve',
+            style: 'background:#d97706;border-color:#d97706;',
+            onclick: () => openDraftForEdit(s.id),
+          }, 'Edit & Resubmit'));
+        }
+        tbody.appendChild(el('tr', { class: isDraft ? 'row-draft' : '' },
           el('td', {}, el('strong', {}, s.reference)),
           el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
           el('td', {}, s.period || '—'),
           el('td', { class: 'num', style: 'text-align:right;' }, '₹ ' + fmt(s.total_amount)),
-          el('td', {}, el('span', { class: 'status-pill ' + s.status }, s.status)),
+          el('td', {}, el('span', { class: 'status-pill ' + s.status }, statusLabel(s.status))),
           el('td', {}, fmtDateShort(s.submitted_at)),
-          el('td', {}, el('div', { class: 'admin-actions' },
-            el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View')
-          ))
+          el('td', {}, actions)
         ));
       }
     } catch (err) {
@@ -796,6 +860,21 @@
 
     const defs = FORM_DEFS[state.company] || [];
 
+    // "Action required" banner — surfaces submissions HR sent back for
+    // edits. Card is mounted hidden and populated by an async refresh so
+    // we don't block the hub render on a network call.
+    const draftsCard = el('div', { class: 'option-card drafts-card', id: 'draftsCard', style: 'display:none;', onclick: () => route('history') },
+      el('div', { class: 'icon-wrap drafts-icon', html: ICONS.receipt || ICONS.briefcase }),
+      el('h3', {},
+        'Action required',
+        el('span', { class: 'card-badge drafts-badge', id: 'draftsBadge' }, '0')
+      ),
+      el('p', { id: 'draftsCardDesc' }, 'Submissions HR sent back for edits. Open one to see what to fix and resubmit.'),
+      el('div', { class: 'arrow' }, el('span', {}, 'Review'), el('div', { html: ICONS.arrow }))
+    );
+    grid.appendChild(draftsCard);
+    refreshDraftsCount();
+
     for (const def of defs) {
       grid.appendChild(
         el('div', { class: 'option-card', onclick: () => openForm(def.key) },
@@ -859,6 +938,30 @@
     } catch (_) { /* not fatal; just hide */ }
   }
 
+  // Hub "Action required" card — shows count of submissions that HR sent
+  // back to the employee for edits (status='draft' with changes_required).
+  // Drafts are also cached so the history page can mark them without a
+  // second network call.
+  async function refreshDraftsCount() {
+    try {
+      const res = await api('/api/submissions');
+      const all = res.submissions || [];
+      const drafts = all.filter(s => s.status === 'draft');
+      state.draftSubmissions = drafts;
+      const card = $('#draftsCard');
+      const badge = $('#draftsBadge');
+      if (!card || !badge) return;
+      badge.textContent = drafts.length;
+      card.style.display = drafts.length > 0 ? '' : 'none';
+      const desc = $('#draftsCardDesc');
+      if (desc) {
+        desc.textContent = drafts.length === 1
+          ? '1 submission was sent back for edits. Open it to see what to fix.'
+          : `${drafts.length} submissions were sent back for edits. Open them to see what to fix.`;
+      }
+    } catch (_) { /* not fatal */ }
+  }
+
   // ===================================================================
   //  ELIGIBILITY — handled by policy-renderer.js
   // ===================================================================
@@ -881,9 +984,84 @@
     state.formData.client_name = '';
     state.uploadToken = uuid();
     state.uploads = [];
+    state.editingSubmissionId = null;   // fresh submission, not an edit
+    state.editingDraftMeta = null;
     // Ensure projects are loaded (cached on state.projects)
     loadProjectsIfNeeded();
     route('form');
+  }
+
+  // Open a returned-for-edit draft submission in the form view. Re-uses
+  // the standard form pipeline — seeds state.formData from the saved
+  // payload, clones the existing attachments into pending uploads so the
+  // user can keep/remove them, and flags state.editingSubmissionId so
+  // submitForm() routes to PATCH instead of POST.
+  async function openDraftForEdit(submissionId) {
+    showLoading('Opening for edit…');
+    try {
+      // 1) Load the full submission detail
+      const { submission: s } = await api(`/api/submissions/${submissionId}`);
+      if (s.status !== 'draft') {
+        toast('This submission is not in draft status and cannot be edited.', 'error');
+        return;
+      }
+      state.currentForm = s.form_type;
+      state.editingSubmissionId = s.id;
+      state.editingDraftMeta = {
+        reference: s.reference,
+        changes_required: s.changes_required || '',
+        returned_at: s.returned_at,
+        reviewed_by: s.reviewed_by,
+      };
+      // 2) Seed the form's working state from the saved payload. The
+      //    payload mirrors what initFormData(formKey) would produce, plus
+      //    the submission-level categorization fields the validator
+      //    stripped before persisting.
+      const fresh = initFormData(s.form_type);
+      state.formData = { ...fresh, ...(s.payload || {}) };
+      state.formData.purpose_category = s.purpose_category || '';
+      state.formData.project_id = s.project ? s.project.id : '';
+      state.formData.client_name = s.client_name || '';
+
+      // 3) Fresh upload token; ask the server to clone the existing
+      //    attachments into the new token's pending pool so they appear
+      //    in the upload list. Employee can remove any; new uploads use
+      //    the same token.
+      state.uploadToken = uuid();
+      state.uploads = [];
+      try {
+        const cloneRes = await api(`/api/submissions/${s.id}/clone-attachments`, {
+          method: 'POST',
+          body: JSON.stringify({ upload_token: state.uploadToken }),
+        });
+        state.uploads = cloneRes.uploads || [];
+      } catch (e) {
+        console.error('[clone-attachments]', e);
+        // Non-fatal — user can still resubmit; they'll just need to re-attach bills
+      }
+
+      // For DTR, re-link entry.bill_pending_id to the new pending upload
+      // ids (the cloned ones expose original_attachment_id + row_idx).
+      if (s.form_type === 'met_dtr' && Array.isArray(state.formData.entries)) {
+        for (let i = 0; i < state.formData.entries.length; i++) {
+          const e = state.formData.entries[i];
+          if (!e || e.mode === 'bus') continue;
+          // Find the cloned upload that has this row_idx
+          const cloned = state.uploads.find(u => u.row_idx === i);
+          if (cloned) {
+            e.bill_pending_id = cloned.id;
+            e.bill_filename = cloned.filename;
+          }
+        }
+      }
+
+      loadProjectsIfNeeded();
+      route('form');
+    } catch (err) {
+      toast(err.message || 'Could not open for edit', 'error');
+    } finally {
+      hideLoading();
+    }
   }
 
   // Projects (fetched once per session; refreshed when admin changes the list)
@@ -1030,6 +1208,26 @@
     if (!isDtr) {
       const ppCard = buildPurposeProjectCard();
       body.insertBefore(ppCard, body.firstChild);
+    }
+
+    // Edit mode: pin a banner showing HR's "what to change" note above
+    // everything else so the employee can't miss it. Updates the page
+    // title and submit button label to match.
+    if (state.editingSubmissionId && state.editingDraftMeta) {
+      const m = state.editingDraftMeta;
+      const banner = el('div', { class: 'draft-banner' },
+        el('div', { class: 'dbl' }, 'What needs to change'),
+        el('div', { class: 'dbm' }, m.changes_required || '(No specific message provided)'),
+        el('div', { class: 'dbs' },
+          `Sent back by ${m.reviewed_by || 'HR'}`,
+          m.returned_at ? ' · ' + new Date(m.returned_at.replace(' ', 'T') + (m.returned_at.endsWith('Z') ? '' : 'Z')).toLocaleString('en-IN') : ''
+        )
+      );
+      body.insertBefore(banner, body.firstChild);
+      $('#formTitle').textContent = `Edit · ${m.reference}`;
+      if ($('#submitBtn')) $('#submitBtn').textContent = 'Resubmit';
+    } else if ($('#submitBtn')) {
+      $('#submitBtn').textContent = 'Submit';
     }
 
     refreshUploadList();
@@ -2578,19 +2776,26 @@
     if (!validateForm()) return;
 
     const isCab = state.currentForm === 'met_cab';
+    const isEdit = !!state.editingSubmissionId;
+
     const ok = await confirmModal({
-      title: 'Submit for approval?',
-      body: isCab
-        ? 'Your cab request will be logged and sent to the admin for pre-approval. Bookings should not be made until approved.'
-        : 'Your claim and bills will be logged and sent to the admin for approval. The final report is generated once approved.',
-      confirmText: 'Submit',
+      title: isEdit ? 'Resubmit for approval?' : 'Submit for approval?',
+      body: isEdit
+        ? 'Your edited submission will be sent back to HR for review.'
+        : (isCab
+            ? 'Your cab request will be logged and sent to the admin for pre-approval. Bookings should not be made until approved.'
+            : 'Your claim and bills will be logged and sent to the admin for approval. The final report is generated once approved.'),
+      confirmText: isEdit ? 'Resubmit' : 'Submit',
     });
     if (!ok) return;
 
-    showLoading('Submitting for approval…');
+    showLoading(isEdit ? 'Resubmitting…' : 'Submitting for approval…');
     try {
-      const res = await api('/api/submissions', {
-        method: 'POST',
+      const url = isEdit
+        ? `/api/submissions/${state.editingSubmissionId}`
+        : '/api/submissions';
+      const res = await api(url, {
+        method: isEdit ? 'PATCH' : 'POST',
         body: JSON.stringify({
           form_type: state.currentForm,
           upload_token: state.uploadToken,
@@ -2598,14 +2803,10 @@
         }),
       });
       state.lastSubmission = res.submission;
-      // Wipe the upload state immediately after a successful submit. The
-      // server has already claimed and deleted these pending rows, but the
-      // client must forget the token too so no subsequent action can ever
-      // re-use it for another form. (Defensive — openForm regenerates it
-      // anyway, but if some flow re-enters the form view without going
-      // through openForm, this prevents the stale token from being sent.)
       state.uploadToken = null;
       state.uploads = [];
+      state.editingSubmissionId = null;
+      state.editingDraftMeta = null;
       route('success');
     } catch (err) {
       toast(err.message || 'Submission failed', 'error');
@@ -2704,7 +2905,7 @@
           el('div', { class: 'admin-actions' },
             el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
             el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : 'Approve'),
-            el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, isSettlement ? 'Reject Settlement' : 'Reject')
+            el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, isSettlement ? 'Reject Settlement' : 'Send back')
           )
         )
       ));
@@ -2738,13 +2939,13 @@
         el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
         el('td', {}, s.period || '—'),
         el('td', { class: 'num', style: 'text-align:right;' }, '₹ ' + fmt(s.total_amount)),
-        el('td', {}, el('span', { class: 'status-pill ' + s.status }, s.status)),
+        el('td', {}, el('span', { class: 'status-pill ' + s.status }, statusLabel(s.status))),
         el('td', {}, fmtDateShort(s.submitted_at)),
         el('td', {},
           el('div', { class: 'admin-actions' },
             el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
             s.status === 'pending' ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, 'Approve') : null,
-            s.status === 'pending' ? el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, 'Reject') : null
+            s.status === 'pending' ? el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, 'Send back') : null
           )
         )
       ));
@@ -2801,21 +3002,32 @@
   async function rejectSubmission(s) {
     if (s.status === 'settlement_pending') return rejectSettlementHandler(s);
 
-    const note = await promptModal({
-      title: 'Reject this claim?',
-      body: `${s.employee_name} · ${s.reference}. Optionally add a reason (logged + written to the Excel sheet).`,
-      placeholder: 'Reason (optional)',
-      confirmText: 'Reject',
+    // The new reject flow is "send back to draft for edits". HR MUST
+    // describe what the employee needs to fix — that text becomes the
+    // changes_required message shown on the draft and emailed to them.
+    const changesRequired = await promptModal({
+      title: 'Send back for edits?',
+      body: `${s.employee_name} · ${s.reference}. The employee will see this message and can edit and resubmit. Be specific so they know what to fix.`,
+      placeholder: 'What needs to change? (e.g. "Wrong project picked on entry #3 — should be AMNS, not KGISL")',
+      confirmText: 'Send back',
+      required: true,
     });
-    if (note === null) return; // cancelled
-    showLoading('Rejecting…');
+    if (changesRequired === null) return; // cancelled
+    if (!changesRequired || !changesRequired.trim()) {
+      toast('Please describe what needs to change.', 'error');
+      return;
+    }
+    showLoading('Sending back…');
     try {
-      await api(`/api/admin/submissions/${s.id}/reject`, { method: 'POST', body: JSON.stringify({ note }) });
-      toast('Rejected', 'success');
+      await api(`/api/admin/submissions/${s.id}/reject`, {
+        method: 'POST',
+        body: JSON.stringify({ changes_required: changesRequired.trim() }),
+      });
+      toast('Sent back to employee for edits', 'success');
       await Promise.all([loadPending(), loadSubmissions()]);
       drawPendingTable(); drawSubmissionsTable();
     } catch (err) {
-      toast(err.message || 'Rejection failed', 'error');
+      toast(err.message || 'Send-back failed', 'error');
     } finally { hideLoading(); }
   }
 
@@ -2845,6 +3057,19 @@
     met_dtr: 'Daily Travel',
     bsc_conveyance: 'Local Conveyance', bsc_expense: 'Travel Expense',
   };
+  // Human-readable status labels — used everywhere a status pill text
+  // is rendered. Anything not in the map falls back to the raw status.
+  const STATUS_LABEL = {
+    pending: 'pending',
+    approved: 'approved',
+    rejected: 'rejected',
+    draft: 'needs edits',
+    advance_approved: 'advance approved',
+    settlement_pending: 'settlement pending',
+    settled: 'settled',
+    settlement_rejected: 'settlement rejected',
+  };
+  function statusLabel(s) { return STATUS_LABEL[s] || s; }
   function fmtDateShort(s) {
     if (!s) return '—';
     const d = new Date(s); return isNaN(d) ? s : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });

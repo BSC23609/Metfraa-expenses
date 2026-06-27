@@ -59,7 +59,7 @@ db.exec(`
     period          TEXT,                           -- YYYY-MM (most forms) or specific dates
     payload_json    TEXT NOT NULL,                  -- full form data (denormalised, source of truth)
     total_amount    REAL NOT NULL DEFAULT 0,
-    status          TEXT NOT NULL DEFAULT 'pending',    -- pending | approved | rejected
+    status          TEXT NOT NULL DEFAULT 'pending',    -- pending | approved | draft (returned for edit) | rejected (legacy) | advance_approved | settlement_pending | settled | settlement_rejected
     pdf_path        TEXT,                           -- final merged report path (set ON APPROVAL)
     email_sent_at   TEXT,
     email_error     TEXT,
@@ -166,6 +166,13 @@ db.exec(`
   add('settlement_reviewed_by',  `settlement_reviewed_by TEXT`);
   add('settlement_reviewed_at',  `settlement_reviewed_at TEXT`);
   add('settlement_note',         `settlement_note TEXT`);
+
+  // Reject-to-draft lifecycle (turn 2). When HR rejects, the row goes
+  // back to status='draft' with the "what needs to change" message in
+  // changes_required and the timestamp in returned_at. The employee can
+  // edit and resubmit, flipping the row back to 'pending'.
+  add('changes_required',        `changes_required TEXT`);
+  add('returned_at',             `returned_at TEXT`);
   // Categorization columns for the dashboard (purpose + project link).
   add('purpose_category',        `purpose_category TEXT`);   // 'project_visit' | 'site_visit' | 'sales_visit' | 'metfraa_office' | 'metfraa_factory' | 'purchase_visit'
   add('project_id',              `project_id INTEGER`);      // FK to projects.id, nullable for Sales Visits with no project
@@ -248,10 +255,32 @@ const stmts = {
     UPDATE submissions SET status='approved', reviewed_by=@reviewed_by,
       reviewed_at=datetime('now'), review_note=@review_note WHERE id=@id
   `),
+  // HR returning a submission for edit. Status goes to 'draft' (not the
+  // legacy 'rejected') so the employee can fix the issues and resubmit.
+  // The "what to fix" text goes into changes_required so the edit page
+  // can surface it prominently; reviewed_by + reviewed_at record WHO
+  // sent it back and WHEN.
   rejectSubmission: db.prepare(`
-    UPDATE submissions SET status='rejected', reviewed_by=@reviewed_by,
-      reviewed_at=datetime('now'), review_note=@review_note WHERE id=@id
+    UPDATE submissions SET status='draft', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), returned_at=datetime('now'),
+      review_note=@review_note, changes_required=@changes_required
+    WHERE id=@id
   `),
+  // Employee resubmitting an edited draft. Clears the "needs to change"
+  // marker but keeps reviewed_by/reviewed_at as the audit of the LAST
+  // rejection (overwritten if HR sends it back again).
+  resubmitFromDraft: db.prepare(`
+    UPDATE submissions SET status='pending',
+      payload_json=@payload_json, total_amount=@total_amount,
+      purpose_category=@purpose_category, project_id=@project_id, client_name=@client_name,
+      submitted_at=datetime('now'),
+      changes_required=NULL, returned_at=NULL
+    WHERE id=@id
+  `),
+  // Replace ALL attachments of a submission (used on resubmit, where the
+  // employee may have added/removed bills). The pending uploads are then
+  // re-linked via the normal attachment-insertion path.
+  deleteAttachmentsForSubmission: db.prepare(`DELETE FROM attachments WHERE submission_id = ?`),
   // -- Travel Advance settlement lifecycle ---------------------------
   // Used by admin approve when the form is met_advance — keeps the advance
   // OPEN (status='advance_approved') instead of closing it as 'approved'.
@@ -300,7 +329,8 @@ const stmts = {
     WHERE s.id = ?
   `),
   listSubmissionsForEmployee: db.prepare(`
-    SELECT id, reference, company, form_type, period, total_amount, status, submitted_at, reviewed_at
+    SELECT id, reference, company, form_type, period, total_amount, status,
+           submitted_at, reviewed_at, changes_required, returned_at
     FROM submissions
     WHERE employee_id = ?
     ORDER BY submitted_at DESC
@@ -369,7 +399,14 @@ const createSubmissionTx = db.transaction((submission, attachments) => {
   const result = stmts.createSubmission.run(submission);
   const submissionId = result.lastInsertRowid;
   for (const att of attachments) {
-    stmts.insertAttachment.run({ ...att, submission_id: submissionId });
+    // row_idx defaults to null for callers that haven't set it (older
+    // submit paths). better-sqlite3 fails the bind if any named param
+    // is missing — this guard keeps the helper backward-compatible.
+    stmts.insertAttachment.run({
+      submission_id: submissionId,
+      row_idx: null,
+      ...att,
+    });
   }
   return submissionId;
 });

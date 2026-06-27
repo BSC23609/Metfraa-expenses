@@ -192,4 +192,73 @@ async function sendApprovalEmail({ submission, employee, formMeta, pdfPath, isSe
   return { messageId: info.messageId, recipients: [employee.email] };
 }
 
-module.exports = { sendSubmissionEmail, sendApprovalEmail };
+// Sent when HR returns a submission for edit. The employee gets a clear
+// explanation of what needs to change + a portal link. No PDF attached
+// (the draft snapshot lives in the portal, and the report will change
+// when they resubmit anyway).
+async function sendReturnedEmail({ submission, employee, formMeta, changesRequired }) {
+  if (!employee.email) return { skipped: true, reason: 'no-employee-email' };
+
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Bharat Steel Group Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+
+  const company = getCompany(submission.company);
+  const subject = `[${company.short}] Action needed · ${submission.reference}`;
+  const portalUrl = process.env.APP_URL || '';
+  const reviewer = submission.reviewed_by || 'HR';
+
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Action needed</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #d97706; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">${company.name}</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">Action Needed</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">Hi ${(employee.name || '').split(' ')[0] || 'there'},</p>
+  <p style="font-size: 14px; line-height: 1.6;">
+    Your ${formMeta.title.toLowerCase()} <strong>${submission.reference}</strong> needs some changes before it can be approved.
+    <strong>${reviewer}</strong> sent it back with the following note:
+  </p>
+
+  <div style="background: #fef3c7; border-left: 4px solid #d97706; padding: 14px 18px; margin: 18px 0; border-radius: 3px;">
+    <div style="font-size: 11px; font-family: monospace; letter-spacing: 0.1em; color: #92400e; text-transform: uppercase; margin-bottom: 6px;">What needs to change</div>
+    <div style="font-size: 14px; color: #1a2332; line-height: 1.6; white-space: pre-wrap;">${escapeHtml(changesRequired)}</div>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">
+    Open the portal, edit your submission, and resubmit it. You don't need to re-upload bills that were already attached — they're still there.
+  </p>
+
+  ${portalUrl ? `<p style="margin: 24px 0;"><a href="${portalUrl}" style="background: #1F7CCB; color: white; padding: 12px 22px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px;">Open the portal →</a></p>` : ''}
+
+  <table style="width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 13px;">
+    <tr><td style="padding: 6px 0; color: #6b7689; width: 140px;">Reference</td><td style="padding: 6px 0; font-weight: 600;">${submission.reference}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Form</td><td style="padding: 6px 0;">${formMeta.title}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Amount</td><td style="padding: 6px 0;">₹ ${fmt(submission.total_amount)}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Sent back by</td><td style="padding: 6px 0;">${reviewer}</td></tr>
+  </table>
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    THE BHARAT STEEL GROUP · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to: employee.email,
+    subject,
+    html,
+  });
+  return { messageId: info.messageId, recipients: [employee.email] };
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+module.exports = { sendSubmissionEmail, sendApprovalEmail, sendReturnedEmail };

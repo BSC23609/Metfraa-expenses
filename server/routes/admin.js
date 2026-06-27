@@ -201,22 +201,56 @@ router.post('/submissions/:id/reject', requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const sub = stmts.getSubmission.get(id);
   if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.status !== 'pending') {
+    return res.status(400).json({ error: `Cannot send back from '${sub.status}' status.` });
+  }
+
+  // The new contract: HR must provide changes_required (the "what to fix"
+  // message). Old clients may still send 'note' — accept that as the
+  // changes_required if the new field is missing. The free-form internal
+  // review_note is still available too.
+  const body = req.body || {};
+  const changesRequired = (body.changes_required || body.note || '').trim();
+  if (!changesRequired) {
+    return res.status(400).json({ error: 'Please describe what needs to change so the employee knows how to fix it.' });
+  }
+  if (changesRequired.length > 2000) {
+    return res.status(400).json({ error: 'Changes-required message is too long (max 2000 chars).' });
+  }
+  const reviewNote = (body.note || '').trim();
 
   try {
-    stmts.rejectSubmission.run({ id, reviewed_by: req.user.email, review_note: (req.body && req.body.note) || '' });
+    stmts.rejectSubmission.run({
+      id, reviewed_by: req.user.email,
+      review_note: reviewNote,
+      changes_required: changesRequired,
+    });
     const employee = {
       name: sub.employee_name, email: sub.employee_email, employee_code: sub.employee_code,
       level: sub.level, designation: sub.designation, department: sub.department,
     };
     const result = await syncSvc.onReject(stmts.getSubmission.get(id), employee);
 
+    // Email the employee — "your submission was sent back, here's why"
+    try {
+      const { sendReturnedEmail } = require('../services/email');
+      const freshSub = stmts.getSubmission.get(id);
+      await sendReturnedEmail({
+        submission: freshSub, employee,
+        formMeta: FORM_META[freshSub.form_type] || { title: 'Reimbursement' },
+        changesRequired,
+      });
+    } catch (e) {
+      console.error('[returned-email]', e);
+    }
+
     stmts.insertAudit.run({
-      actor_email: req.user.email, action: 'REJECT', target_type: 'submission', target_id: id,
-      meta_json: JSON.stringify({ ref: sub.reference, note: (req.body && req.body.note) || '', od_synced: result.synced }),
+      actor_email: req.user.email, action: 'RETURN_FOR_EDIT', target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, changes_required: changesRequired.slice(0, 500), od_synced: result.synced }),
       ip_address: req.ip,
     });
 
-    res.json({ ok: true, od_synced: result.synced });
+    res.json({ ok: true, returned_for_edit: true, od_synced: result.synced });
   } catch (err) {
     console.error('[reject]', err);
     res.status(500).json({ error: err.message || 'Rejection failed' });
