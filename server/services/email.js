@@ -112,4 +112,84 @@ async function sendSubmissionEmail({ submission, employee, formMeta, attachments
   return { messageId: info.messageId, recipients: to };
 }
 
-module.exports = { sendSubmissionEmail };
+// Sends the approved report to the EMPLOYEE so they have a copy of the
+// final signed-off PDF (with "Checked & approved by ..." on it). Sent
+// after admin clicks Approve; for travel-advance settlement it's sent
+// when the settlement is approved (the final closure).
+async function sendApprovalEmail({ submission, employee, formMeta, pdfPath, isSettlement = false }) {
+  if (!employee.email) return { skipped: true, reason: 'no-employee-email' };
+
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Bharat Steel Group Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+
+  const mailAttachments = [];
+  if (pdfPath && fs.existsSync(pdfPath)) {
+    mailAttachments.push({
+      filename: `${submission.reference}.pdf`,
+      path: pdfPath,
+      contentType: 'application/pdf',
+    });
+  }
+
+  const company = getCompany(submission.company);
+  const subject = isSettlement
+    ? `[${company.short}] Settlement Approved · ${submission.reference}`
+    : `[${company.short}] ${formMeta.title} Approved · ${submission.reference}`;
+
+  const reviewer  = isSettlement ? (submission.settlement_reviewed_by || 'HR') : (submission.reviewed_by || 'HR');
+  const reviewedAt = isSettlement ? submission.settlement_reviewed_at : submission.reviewed_at;
+  const formattedAt = reviewedAt
+    ? new Date(reviewedAt.length === 19 && reviewedAt[10] === ' ' ? reviewedAt.replace(' ', 'T') + 'Z' : reviewedAt).toLocaleString('en-IN')
+    : 'now';
+
+  const note = isSettlement ? (submission.settlement_note || '') : (submission.review_note || '');
+
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>${formMeta.title} approved</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #0d1421; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">${company.name}</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">${isSettlement ? 'Settlement Approved' : 'Approved'}</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">Hi ${(employee.name || '').split(' ')[0] || 'there'},</p>
+  <p style="font-size: 14px; line-height: 1.6;">
+    Your ${formMeta.title.toLowerCase()} <strong>${submission.reference}</strong> has been
+    ${isSettlement ? 'settled and closed' : 'approved'} by <strong>${reviewer}</strong> on
+    <strong>${formattedAt}</strong>. The final signed PDF is attached for your records.
+  </p>
+
+  <table style="width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 13px;">
+    <tr><td style="padding: 6px 0; color: #6b7689; width: 140px;">Reference</td><td style="padding: 6px 0; font-weight: 600;">${submission.reference}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Form</td><td style="padding: 6px 0;">${formMeta.title}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Amount</td><td style="padding: 6px 0;">₹ ${fmt(submission.total_amount)}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Period</td><td style="padding: 6px 0;">${submission.period || '—'}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Approver</td><td style="padding: 6px 0;">${reviewer}</td></tr>
+    <tr><td style="padding: 6px 0; color: #6b7689;">Decided</td><td style="padding: 6px 0;">${formattedAt}</td></tr>
+    ${note ? `<tr><td style="padding: 6px 0; color: #6b7689;">Note</td><td style="padding: 6px 0; font-style: italic;">${note}</td></tr>` : ''}
+  </table>
+
+  <p style="font-size: 13px; color: #6b7689; margin-top: 24px; line-height: 1.6;">
+    The full report (with all bills merged) is attached. You can also view and download it any time from the portal.
+  </p>
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    THE BHARAT STEEL GROUP · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to: employee.email,
+    subject,
+    html,
+    attachments: mailAttachments,
+  });
+  return { messageId: info.messageId, recipients: [employee.email] };
+}
+
+module.exports = { sendSubmissionEmail, sendApprovalEmail };

@@ -237,21 +237,61 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
       doc.y = banY + banH + 24;
 
       // -- Signature row: Employee · Checked By · Approved By --------
+      //   The middle (CHECKED BY) and right (APPROVED BY) slots are now
+      //   filled in based on the submission's lifecycle state when the
+      //   snapshot is generated:
+      //     - draft / pending → both empty (awaiting review)
+      //     - approved / settled → both filled with the reviewer + datetime
+      //     - advance_approved → CHECKED BY filled, APPROVED BY waits for settlement
+      //     - settlement_pending → CHECKED BY = original advance approver,
+      //       APPROVED BY waits for settlement approval
       if (doc.y > doc.page.height - 160) doc.addPage();
       const sigY = doc.y + 40;
       const gap = 24;
       const sigColW = (doc.page.width - 100 - gap * 2) / 3;
+
+      // Build the signoff lines based on lifecycle state
+      const fmtSignoff = (who, when) => {
+        if (!who) return '';
+        let line = who;
+        if (when) {
+          try {
+            // SQLite returns 'YYYY-MM-DD HH:MM:SS' UTC — append Z so JS parses correctly
+            const iso = when.length === 19 && when[10] === ' ' ? when.replace(' ', 'T') + 'Z' : when;
+            line += ' · ' + new Date(iso).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+          } catch (_) { line += ' · ' + when; }
+        }
+        return line;
+      };
+
+      let checkedBy = '', approvedBy = '';
+      if (submission.status === 'approved' || submission.status === 'settled') {
+        // Same person checked AND approved (for advance: the settlement reviewer
+        // is the final approver; the original advance approval was the "check")
+        if (submission.status === 'settled') {
+          checkedBy  = fmtSignoff(submission.reviewed_by, submission.reviewed_at);
+          approvedBy = fmtSignoff(submission.settlement_reviewed_by, submission.settlement_reviewed_at);
+        } else {
+          checkedBy  = fmtSignoff(submission.reviewed_by, submission.reviewed_at);
+          approvedBy = fmtSignoff(submission.reviewed_by, submission.reviewed_at);
+        }
+      } else if (submission.status === 'advance_approved' || submission.status === 'settlement_pending') {
+        checkedBy = fmtSignoff(submission.reviewed_by, submission.reviewed_at);
+        // Approval pending — leave APPROVED BY blank
+      }
+      // For 'pending' (and 'draft' in turn 2), both stay blank.
+
       const cols = [
         { x: 50,                       name: employee.name || '', label: 'EMPLOYEE · DATE' },
-        { x: 50 + sigColW + gap,       name: '',                  label: 'CHECKED BY · DATE' },
-        { x: 50 + (sigColW + gap) * 2, name: '',                  label: 'APPROVED BY · DATE' },
+        { x: 50 + sigColW + gap,       name: checkedBy,           label: 'CHECKED BY · DATE' },
+        { x: 50 + (sigColW + gap) * 2, name: approvedBy,          label: 'APPROVED BY · DATE' },
       ];
       cols.forEach(c => {
         doc.lineWidth(0.7).strokeColor(INK)
            .moveTo(c.x, sigY).lineTo(c.x + sigColW, sigY).stroke();
         if (c.name) {
-          doc.fontSize(10).fillColor(INK).font('Helvetica')
-             .text(c.name, c.x, sigY + 4, { width: sigColW });
+          doc.fontSize(9).fillColor(INK).font('Helvetica')
+             .text(c.name, c.x, sigY + 4, { width: sigColW, lineBreak: false, ellipsis: true });
         }
         doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
            .text(c.label, c.x, sigY + 20, { characterSpacing: 1.1, width: sigColW });

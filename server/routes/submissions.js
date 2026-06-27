@@ -13,6 +13,7 @@ const { generatePdf } = require('../services/pdf');
 const { sendSubmissionEmail } = require('../services/email');
 const syncSvc = require('../services/sync');
 const { requireAuth } = require('../services/auth');
+const { buildReportPdf, buildMergedPreview } = require('../services/report-builder');
 
 const router = express.Router();
 
@@ -142,21 +143,31 @@ router.post('/', requireAuth, async (req, res) => {
     const linkedAttachments = stmts.listAttachments.all(submissionId);
     const fullSubmission = stmts.getSubmission.get(submissionId);
 
-    // 6) Mirror to OneDrive (fail-soft): push raw bills + append Excel log
-    //    row as "Pending". NO report PDF is generated yet — that happens
-    //    only on admin approval.
+    // 6) Build the draft snapshot report (so it's available in OneDrive +
+    //    the app immediately, not only after approval). This file gets
+    //    OVERWRITTEN at every later lifecycle step (approve / settle / etc.)
+    //    so OneDrive always holds the latest snapshot for the submission.
+    let draftReportPath = null;
+    try {
+      draftReportPath = await buildReportPdf(fullSubmission, { draft: true });
+    } catch (e) {
+      console.error('[draft-report]', e);
+    }
+
+    // 7) Mirror to OneDrive (fail-soft): push raw bills + the draft snapshot
+    //    + append the Excel log row as "Pending".
     let sync = { synced: false };
     try {
       sync = await syncSvc.onSubmit(fullSubmission, {
         name: req.user.name, email: req.user.email,
         employee_code: req.user.employee_code, level: req.user.level,
         designation: req.user.designation, department: req.user.department,
-      }, linkedAttachments);
+      }, linkedAttachments, draftReportPath);
     } catch (e) {
       console.error('[sync.onSubmit]', e);
     }
 
-    // 7) Audit
+    // 8) Audit
     stmts.insertAudit.run({
       actor_email: req.user.email,
       action: 'SUBMIT',
@@ -257,6 +268,22 @@ router.post('/:id/settle', requireAuth, async (req, res) => {
 
     console.log(`[settle] user=${req.user.email} sub=${id} ref=${sub.reference} actual=${actualAmount} advance=${sub.total_amount} bills=${pending.length}`);
 
+    // Regenerate the snapshot now that actuals + bills have been added.
+    // The PDF will show the settlement section + CHECKED BY = advance
+    // approver (still); APPROVED BY waits for settlement approval.
+    try {
+      const fresh = stmts.getSubmission.get(id);
+      const reportPdfPath = await buildReportPdf(fresh, { draft: false });
+      const attachments = stmts.listAttachments.all(id);
+      await syncSvc.buildAndArchiveSnapshot(fresh, {
+        name: req.user.name, email: req.user.email,
+        employee_code: req.user.employee_code, level: req.user.level,
+        designation: req.user.designation, department: req.user.department,
+      }, attachments, reportPdfPath);
+    } catch (e) {
+      console.error('[settlement snapshot]', e);
+    }
+
     res.json({
       ok: true,
       submission: {
@@ -272,9 +299,6 @@ router.post('/:id/settle', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message || 'Settlement failed' });
   }
 });
-
-// Build a report PDF on-demand (used for draft preview of pending items)
-const { buildReportPdf, buildMergedPreview } = require('../services/report-builder');
 
 // GET /api/submissions/:id/pdf — stream the report (report + bills merged)
 //   approved → the stored merged PDF

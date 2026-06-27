@@ -2621,16 +2621,24 @@
     const s = state.lastSubmission;
     if (!s) { route('hub'); return; }
     $('#successRef').textContent = s.reference;
-    // Pending approval: hide the download button (no report yet)
+    // The draft report is generated at submit-time now, so View + Download
+    // both work right away. Re-wire the download button to point at this
+    // submission and make it visible.
     const dlBtn = $('#downloadPdfBtn');
-    if (dlBtn) dlBtn.style.display = 'none';
+    if (dlBtn) {
+      dlBtn.style.display = '';
+      dlBtn.onclick = (e) => {
+        e.preventDefault();
+        window.open(`/api/submissions/${s.id}/pdf?download=1`, '_blank');
+      };
+    }
     const heading = document.querySelector('#page-success .success-wrap h1');
     const para = document.querySelector('#page-success .success-wrap p');
     if (heading) heading.textContent = 'Submitted for Approval';
-    if (para) para.textContent = 'Your entry has been logged and sent to the admin for review. The final report is generated once it’s approved.';
+    if (para) para.textContent = 'Your entry has been logged and the draft report is ready to view. You can download it now; once an admin approves, the report updates to show their sign-off.';
     $('#successRecipients').textContent = s.od_synced
-      ? '✓ Logged to OneDrive · pending admin approval'
-      : 'Saved · pending admin approval';
+      ? '✓ Draft report stored in OneDrive · awaiting admin approval'
+      : 'Saved · awaiting admin approval';
   }
 
   // ===================================================================

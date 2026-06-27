@@ -8,6 +8,8 @@ const { requireAdmin } = require('../services/auth');
 const { hashPassword, authMethodForEmail } = require('../services/auth');
 const syncSvc = require('../services/sync');
 const { buildReportPdf } = require('../services/report-builder');
+const { sendApprovalEmail } = require('../services/email');
+const { FORM_META } = require('../services/validators');
 
 const router = express.Router();
 
@@ -59,6 +61,20 @@ router.post('/submissions/:id/approve', requireAdmin, async (req, res) => {
     if (isAdvance) {
       // Advance: keep it open, awaiting employee settlement after the trip.
       stmts.approveAdvanceRequest.run({ id, reviewed_by: req.user.email, review_note: (req.body && req.body.note) || '' });
+      // Regenerate the snapshot — its signature row now shows the advance
+      // approver in the CHECKED BY slot; APPROVED BY waits for settlement.
+      try {
+        const fresh = stmts.getSubmission.get(id);
+        const reportPdfPath = await buildReportPdf(fresh, { draft: false });
+        const attachments = stmts.listAttachments.all(id);
+        await syncSvc.buildAndArchiveSnapshot(fresh, {
+          name: sub.employee_name, email: sub.employee_email,
+          employee_code: sub.employee_code, level: sub.level,
+          designation: sub.designation, department: sub.department,
+        }, attachments, reportPdfPath);
+      } catch (e) {
+        console.error('[advance-approve snapshot]', e);
+      }
       stmts.insertAudit.run({
         actor_email: req.user.email, action: 'APPROVE_ADVANCE', target_type: 'submission', target_id: id,
         meta_json: JSON.stringify({ ref: sub.reference }),
@@ -78,6 +94,18 @@ router.post('/submissions/:id/approve', requireAdmin, async (req, res) => {
       level: sub.level, designation: sub.designation, department: sub.department,
     };
     const result = await syncSvc.onApprove(stmts.getSubmission.get(id), employee, attachments, reportPdfPath);
+
+    // Email the employee a copy of the signed approved report (fail-soft)
+    try {
+      const freshSub = stmts.getSubmission.get(id);
+      await sendApprovalEmail({
+        submission: freshSub, employee,
+        formMeta: FORM_META[freshSub.form_type] || { title: 'Reimbursement' },
+        pdfPath: result.mergedPath,
+      });
+    } catch (e) {
+      console.error('[approval-email]', e);
+    }
 
     stmts.insertAudit.run({
       actor_email: req.user.email, action: 'APPROVE', target_type: 'submission', target_id: id,
@@ -120,6 +148,19 @@ router.post('/submissions/:id/approve-settlement', requireAdmin, async (req, res
       level: sub.level, designation: sub.designation, department: sub.department,
     };
     const result = await syncSvc.onApprove(fresh, employee, attachments, reportPdfPath);
+
+    // Email the employee the final closed-out report
+    try {
+      const freshSub = stmts.getSubmission.get(id);
+      await sendApprovalEmail({
+        submission: freshSub, employee,
+        formMeta: FORM_META[freshSub.form_type] || { title: 'Travel Advance' },
+        pdfPath: result.mergedPath, isSettlement: true,
+      });
+    } catch (e) {
+      console.error('[settlement-approval-email]', e);
+    }
+
     stmts.insertAudit.run({
       actor_email: req.user.email, action: 'APPROVE_SETTLEMENT', target_type: 'submission', target_id: id,
       meta_json: JSON.stringify({ ref: sub.reference, od_synced: result.synced }),

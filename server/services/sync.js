@@ -31,10 +31,47 @@ function resolveLocal(p) {
   return path.isAbsolute(p) ? p : path.join(__dirname, '..', '..', p);
 }
 
+// Build the merged report locally + push to OneDrive Reports/. ALWAYS overwrites
+// any existing copy with the same name (so the latest lifecycle state is what's
+// archived). Used by onSubmit, onApprove, and the advance-lifecycle hooks.
+//   sub             – fresh row from getSubmission (joined with employee)
+//   employee        – { name, email, employee_code, level, designation, department }
+//   attachments     – rows from listAttachments
+//   reportPdfPath   – path to the base report PDF (already built by report-builder)
+// Returns { mergedPath, syncedToOneDrive, reason }.
+async function buildAndArchiveSnapshot(sub, employee, attachments, reportPdfPath) {
+  if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  const mergedPath = path.join(REPORTS_DIR, `${sub.reference}.pdf`);
+  await mergeReportWithBills(reportPdfPath, attachments, mergedPath);
+  stmts.updateSubmissionPdf.run(mergedPath, sub.id);
+
+  if (!od.isConfigured()) {
+    return { mergedPath, syncedToOneDrive: false, reason: 'not_configured' };
+  }
+  try {
+    const folder = reportsFolder(employee);
+    await od.ensureFolder(folder);
+    const buf = fs.readFileSync(mergedPath);
+    await od.uploadFile(folder, `${sub.reference}.pdf`, buf, 'application/pdf');
+    stmts.markReportSynced.run(sub.id);
+    return { mergedPath, syncedToOneDrive: true };
+  } catch (e) {
+    return { mergedPath, syncedToOneDrive: false, reason: e.message };
+  }
+}
+
 // -- ON SUBMIT -------------------------------------------------------
-async function onSubmit(sub, employee, attachments) {
+//   1. Mirror raw bills to <Employee>/Uploads/
+//   2. Build the draft snapshot report (overwrites file in <Employee>/Reports/)
+//   3. Append the Excel log row (status: Pending)
+async function onSubmit(sub, employee, attachments, reportPdfPath) {
   if (!od.isConfigured()) {
     stmts.markOdError.run('OneDrive not configured', sub.id);
+    // Still build the merged PDF locally so the app can serve View/Download
+    if (reportPdfPath) {
+      try { await buildAndArchiveSnapshot(sub, employee, attachments, reportPdfPath); }
+      catch (e) { /* swallow — local-only fallback */ }
+    }
     return { synced: false, reason: 'not_configured' };
   }
   let anyError = null;
@@ -58,7 +95,20 @@ async function onSubmit(sub, employee, attachments) {
     anyError = `uploads: ${e.message}`;
   }
 
-  // 2) Excel log row (status Pending)
+  // 2) Build + archive the draft snapshot to <Employee>/Reports/
+  //    (overwrites on every subsequent lifecycle change)
+  if (reportPdfPath) {
+    try {
+      const r = await buildAndArchiveSnapshot(sub, employee, attachments, reportPdfPath);
+      if (!r.syncedToOneDrive && r.reason) {
+        anyError = (anyError ? anyError + ' | ' : '') + `report: ${r.reason}`;
+      }
+    } catch (e) {
+      anyError = (anyError ? anyError + ' | ' : '') + `report: ${e.message}`;
+    }
+  }
+
+  // 3) Excel log row (status Pending)
   try {
     await excel.appendEntry(sub, employee);
     stmts.markLogSynced.run(sub.id);
@@ -71,44 +121,26 @@ async function onSubmit(sub, employee, attachments) {
 }
 
 // -- ON APPROVE ------------------------------------------------------
-//  Generates the merged report locally, stores it on OneDrive, updates Excel.
+//  Generates the merged report locally, OVERWRITES the OneDrive copy with
+//  the post-approval snapshot, updates Excel.
 async function onApprove(sub, employee, attachments, reportPdfPath) {
-  // Always build the merged report locally first (so it's downloadable
-  // even if OneDrive is momentarily down).
-  if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
-  const mergedPath = path.join(REPORTS_DIR, `${sub.reference}.pdf`);
-  await mergeReportWithBills(reportPdfPath, attachments, mergedPath);
-  stmts.updateSubmissionPdf.run(mergedPath, sub.id);
-
-  if (!od.isConfigured()) {
-    stmts.markOdError.run('OneDrive not configured', sub.id);
-    return { synced: false, mergedPath, reason: 'not_configured' };
-  }
-
+  const r = await buildAndArchiveSnapshot(sub, employee, attachments, reportPdfPath);
   let anyError = null;
+  if (!r.syncedToOneDrive && r.reason) anyError = `report: ${r.reason}`;
 
-  // Store merged report → Reports/
-  try {
-    const folder = reportsFolder(employee);
-    await od.ensureFolder(folder);
-    const buf = fs.readFileSync(mergedPath);
-    await od.uploadFile(folder, `${sub.reference}.pdf`, buf, 'application/pdf');
-    stmts.markReportSynced.run(sub.id);
-  } catch (e) {
-    anyError = `report: ${e.message}`;
+  // Update Excel row → Approved / Settled / etc.
+  if (od.isConfigured()) {
+    try {
+      const fresh = stmts.getSubmission.get(sub.id);
+      await excel.updateEntryStatus(fresh, employee);
+      stmts.markLogSynced.run(sub.id);
+    } catch (e) {
+      anyError = (anyError ? anyError + ' | ' : '') + `log: ${e.message}`;
+    }
   }
 
-  // Update Excel row → Approved
-  try {
-    const fresh = stmts.getSubmission.get(sub.id);
-    await excel.updateEntryStatus(fresh, employee);
-    stmts.markLogSynced.run(sub.id);
-  } catch (e) {
-    anyError = (anyError ? anyError + ' | ' : '') + `log: ${e.message}`;
-  }
-
-  if (anyError) { stmts.markOdError.run(anyError.slice(0, 480), sub.id); return { synced: false, mergedPath, reason: anyError }; }
-  return { synced: true, mergedPath };
+  if (anyError) { stmts.markOdError.run(anyError.slice(0, 480), sub.id); return { synced: false, mergedPath: r.mergedPath, reason: anyError }; }
+  return { synced: true, mergedPath: r.mergedPath };
 }
 
 // -- ON REJECT -------------------------------------------------------
@@ -125,4 +157,4 @@ async function onReject(sub, employee) {
   }
 }
 
-module.exports = { onSubmit, onApprove, onReject, uploadsFolder, reportsFolder };
+module.exports = { onSubmit, onApprove, onReject, buildAndArchiveSnapshot, uploadsFolder, reportsFolder };

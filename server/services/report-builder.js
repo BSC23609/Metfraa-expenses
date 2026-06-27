@@ -44,6 +44,12 @@ async function buildReportPdf(sub, { draft = true } = {}) {
       project: project ? { id: project.id, code: project.code, name: project.name } : null,
       client_name: sub.client_name || null,
       project_lookup: projectLookup,
+      // Lifecycle — read by the signature row + footer
+      status: sub.status,
+      reviewed_by: sub.reviewed_by, reviewed_at: sub.reviewed_at, review_note: sub.review_note,
+      settlement_reviewed_by: sub.settlement_reviewed_by,
+      settlement_reviewed_at: sub.settlement_reviewed_at,
+      settlement_note: sub.settlement_note,
     },
     employee: {
       name: sub.employee_name, email: sub.employee_email, employee_code: sub.employee_code,
