@@ -2172,3 +2172,49 @@ body::after {
   color: var(--bsg-muted);
   font-size: 14px;
 }
+
+/* ---- Payments tab ---------------------------------------------- */
+.pay-row-paid {
+  background: rgba(5,150,105,0.04);
+}
+.pay-row-paid:hover {
+  background: rgba(5,150,105,0.07);
+}
+.paid-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  background: linear-gradient(to right, rgba(37,99,235,0.06), transparent);
+  border-left: 4px solid var(--bsg-blue);
+  padding: 18px 22px;
+  border-radius: 4px;
+}
+.paid-summary .ps-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bsg-muted);
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.paid-summary .ps-amount {
+  font-family: 'Oswald', sans-serif;
+  font-size: 28px;
+  color: var(--bsg-ink);
+  font-weight: 600;
+  line-height: 1;
+}
+.paid-summary .ps-count {
+  font-family: 'Oswald', sans-serif;
+  font-size: 22px;
+  color: var(--bsg-ink);
+  font-weight: 500;
+  line-height: 1;
+}
+.pay-already {
+  background: rgba(5,150,105,0.08);
+  border-left: 4px solid var(--bsg-success);
+  padding: 12px 16px;
+  border-radius: 3px;
+}

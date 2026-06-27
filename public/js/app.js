@@ -2864,6 +2864,7 @@
     $$('.admin-tabpane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
     if (tab === 'projects') loadProjectsAdmin().then(drawProjectTable);
     if (tab === 'dashboard') loadDashboard();
+    if (tab === 'payments') loadPayments();
   }
 
   // ---- Pending approvals --------------------------------------------
@@ -3536,6 +3537,225 @@
     } catch (err) { toast(err.message || 'Reactivate failed', 'error'); }
   }
 
+  // ---- Payments (admin) ---------------------------------------------
+  //   Lets HR pick a month, see every employee with approved/settled
+  //   submissions for that month + their total payable, mark them paid
+  //   (which records who/when + sends a confirmation email), or undo.
+  //   Drill-in modal shows the itemised breakdown before marking.
+  let paySelectedEmp = null;   // current employee in the detail modal
+
+  async function loadPayments() {
+    // Default the month picker to the current month if nothing's set
+    const ip = $('#payMonth');
+    if (ip && !ip.value) {
+      const now = new Date();
+      ip.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    }
+    await drawPaymentsTable();
+  }
+
+  async function drawPaymentsTable() {
+    const tbody = $('#payTableBody');
+    if (!tbody) return;
+    const monthStr = $('#payMonth').value;
+    if (!monthStr) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--bsg-muted);padding:32px;">Pick a month to view payable employees.</td></tr>';
+      $('#payCount').textContent = '';
+      return;
+    }
+    const [y, m] = monthStr.split('-').map(n => parseInt(n, 10));
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--bsg-muted);padding:32px;">Loading…</td></tr>';
+    try {
+      const data = await api(`/api/admin/payments?year=${y}&month=${m}`);
+      state.paymentsForMonth = data;
+      tbody.innerHTML = '';
+      const emps = data.employees || [];
+      if (!emps.length) {
+        tbody.appendChild(el('tr', {},
+          el('td', { colspan: 6, style: 'text-align:center;color:var(--bsg-muted);padding:32px;' },
+            `No approved or settled claims for ${monthName(m)} ${y}.`)
+        ));
+      }
+      let paidCount = 0, totalPayable = 0;
+      for (const emp of emps) {
+        const isPaid = !!emp.paid;
+        if (isPaid) paidCount++;
+        totalPayable += emp.total_payable;
+
+        tbody.appendChild(el('tr', { class: isPaid ? 'pay-row-paid' : '' },
+          el('td', {},
+            el('strong', {}, emp.name),
+            el('div', { style: 'font-family:monospace;font-size:11px;color:var(--bsg-muted);margin-top:2px;' }, emp.email)
+          ),
+          el('td', { class: 'num', style: 'text-align:right;font-weight:600;' }, '₹ ' + fmt(emp.total_payable)),
+          el('td', {}, `${emp.submission_count} ${emp.submission_count === 1 ? 'claim' : 'claims'}`),
+          el('td', {}, el('span', {
+            class: 'status-pill ' + (isPaid ? 'approved' : 'pending'),
+          }, isPaid ? 'paid' : 'unpaid')),
+          el('td', { style: 'font-size:12px;color:var(--bsg-muted);' },
+            isPaid ? formatPaidLine(emp.paid) : '—'
+          ),
+          el('td', { style: 'text-align:right;' },
+            el('div', { class: 'admin-actions' },
+              el('button', { class: 'view', onclick: () => openPayDetail(emp) }, 'View'),
+              isPaid
+                ? el('button', { class: 'reject', onclick: () => undoPaid(emp) }, 'Undo')
+                : el('button', { class: 'approve', onclick: () => markPaidWithConfirm(emp) }, 'Mark Paid')
+            )
+          )
+        ));
+      }
+      const subtitle = paidCount === emps.length && emps.length > 0
+        ? `${emps.length} ${emps.length === 1 ? 'employee' : 'employees'} · all paid · ₹ ${fmt(totalPayable)} total`
+        : `${emps.length} ${emps.length === 1 ? 'employee' : 'employees'} · ${paidCount} paid · ₹ ${fmt(totalPayable)} total`;
+      $('#payCount').textContent = subtitle;
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--bsg-danger);padding:24px;">${err.message || 'Failed to load'}</td></tr>`;
+    }
+  }
+
+  function formatPaidLine(paid) {
+    if (!paid) return '—';
+    let line = (paid.paid_by ? paid.paid_by.split('@')[0] : 'admin') + ' · ';
+    try {
+      const iso = paid.paid_at && paid.paid_at.length === 19 && paid.paid_at[10] === ' '
+        ? paid.paid_at.replace(' ', 'T') + 'Z' : paid.paid_at;
+      line += iso ? new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+    } catch (_) { line += paid.paid_at || ''; }
+    if (paid.email_sent_at) line += ' · ✉ sent';
+    return line;
+  }
+
+  function monthName(m) {
+    return new Date(2000, m - 1, 1).toLocaleString('en-IN', { month: 'long' });
+  }
+
+  // Detail modal: show the breakdown of which submissions are being paid
+  function openPayDetail(emp) {
+    paySelectedEmp = emp;
+    const data = state.paymentsForMonth || {};
+    $('#payDetailEmp').textContent = emp.email || '—';
+    $('#payDetailMonth').textContent = `${emp.name} · ${monthName(data.month)} ${data.year}`;
+    const pill = $('#payDetailStatusPill');
+    pill.className = 'status-pill ' + (emp.paid ? 'approved' : 'pending');
+    pill.textContent = emp.paid ? 'paid' : 'unpaid';
+
+    const body = $('#payDetailBody');
+    body.innerHTML = '';
+
+    // Summary band
+    const total = emp.total_payable;
+    body.appendChild(el('div', { class: 'paid-summary' },
+      el('div', {},
+        el('div', { class: 'ps-label' }, 'TOTAL PAYABLE'),
+        el('div', { class: 'ps-amount' }, '₹ ' + fmt(total)),
+      ),
+      el('div', { style: 'text-align:right;' },
+        el('div', { class: 'ps-label' }, 'CLAIMS'),
+        el('div', { class: 'ps-count' }, String(emp.submission_count)),
+      )
+    ));
+
+    // Breakdown table
+    const table = el('table', { class: 'admin-table', style: 'margin-top:18px;' });
+    table.appendChild(el('thead', {}, el('tr', {},
+      el('th', {}, 'Reference'),
+      el('th', {}, 'Form'),
+      el('th', {}, 'Status'),
+      el('th', { style: 'text-align:right;' }, 'Amount'),
+      el('th', { style: 'text-align:right;' }, 'Actions'),
+    )));
+    const tbody = el('tbody');
+    for (const s of (emp.submissions || [])) {
+      tbody.appendChild(el('tr', {},
+        el('td', {}, el('strong', {}, s.reference)),
+        el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
+        el('td', {}, el('span', { class: 'status-pill ' + s.status }, statusLabel(s.status))),
+        el('td', { class: 'num', style: 'text-align:right;' }, '₹ ' + fmt(s.payable_amount)),
+        el('td', { style: 'text-align:right;' },
+          el('button', { class: 'view', onclick: () => {
+            $('#payDetailBackdrop').classList.remove('show');
+            viewSubmission(s.id);
+          } }, 'Open')
+        ),
+      ));
+    }
+    table.appendChild(tbody);
+    body.appendChild(table);
+
+    if (emp.paid) {
+      body.appendChild(el('div', { class: 'pay-already', style: 'margin-top:18px;' },
+        el('div', { style: 'font-family:monospace;font-size:10px;letter-spacing:0.08em;color:#065f46;text-transform:uppercase;margin-bottom:4px;' }, 'Already paid'),
+        el('div', { style: 'font-size:13px;' }, `Marked paid by ${emp.paid.paid_by} on ${formatPaidLine(emp.paid).replace(emp.paid.paid_by.split('@')[0] + ' · ', '')}`),
+        emp.paid.email_sent_at
+          ? el('div', { style: 'font-size:12px;color:var(--bsg-muted);margin-top:4px;' }, 'Confirmation email was sent to the employee.')
+          : null,
+      ));
+    }
+
+    // Show/hide the Mark Paid button based on state
+    const markBtn = $('#payDetailMark');
+    markBtn.style.display = emp.paid ? 'none' : '';
+
+    $('#payDetailBackdrop').classList.add('show');
+  }
+
+  async function markPaidWithConfirm(emp) {
+    // The detail modal is the canonical mark-paid flow; the table button
+    // just opens it. (Direct mark on the table row could land badly if HR
+    // hadn't reviewed the breakdown.)
+    openPayDetail(emp);
+  }
+
+  async function confirmMarkPaid() {
+    if (!paySelectedEmp) return;
+    const data = state.paymentsForMonth || {};
+    const ok = await confirmModal({
+      title: `Mark as paid?`,
+      body: `${paySelectedEmp.name} will be recorded as paid ₹${fmt(paySelectedEmp.total_payable)} for ${monthName(data.month)} ${data.year}, and a confirmation email will be sent to ${paySelectedEmp.email}.`,
+      confirmText: 'Mark Paid & Send Email',
+    });
+    if (!ok) return;
+    showLoading('Marking paid…');
+    try {
+      const res = await api('/api/admin/payments/mark', {
+        method: 'POST',
+        body: JSON.stringify({
+          employee_id: paySelectedEmp.id,
+          year: data.year, month: data.month,
+        }),
+      });
+      if (res.email_sent) toast('Marked paid & email sent', 'success');
+      else toast('Marked paid (email could not be sent: ' + (res.email_error || 'unknown') + ')', 'success');
+      $('#payDetailBackdrop').classList.remove('show');
+      paySelectedEmp = null;
+      await drawPaymentsTable();
+    } catch (err) {
+      toast(err.message || 'Mark-paid failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  async function undoPaid(emp) {
+    const data = state.paymentsForMonth || {};
+    const ok = await confirmModal({
+      title: 'Undo paid status?',
+      body: `Remove the paid marker for ${emp.name} · ${monthName(data.month)} ${data.year}. (No email is sent on undo; the confirmation email they already received stays in their inbox.)`,
+      confirmText: 'Undo',
+    });
+    if (!ok) return;
+    showLoading('Undoing…');
+    try {
+      await api('/api/admin/payments/unmark', {
+        method: 'POST',
+        body: JSON.stringify({ employee_id: emp.id, year: data.year, month: data.month }),
+      });
+      toast('Reverted to unpaid', 'success');
+      await drawPaymentsTable();
+    } catch (err) {
+      toast(err.message || 'Undo failed', 'error');
+    } finally { hideLoading(); }
+  }
+
   // ---- Dashboard (admin) --------------------------------------------
   //   Fetches aggregated spend from /api/admin/dashboard and renders
   //   summary tiles + three Chart.js charts. Charts are recreated on each
@@ -3798,6 +4018,13 @@
   $('#subStatusFilter') && $('#subStatusFilter').addEventListener('change', async () => { await loadSubmissions(); drawSubmissionsTable(); });
   $('#subExpandAll')   && $('#subExpandAll').addEventListener('click',  () => setAllFolders('sub', true));
   $('#subCollapseAll') && $('#subCollapseAll').addEventListener('click', () => setAllFolders('sub', false));
+
+  // Payments tab
+  $('#payMonth')      && $('#payMonth').addEventListener('change', drawPaymentsTable);
+  $('#payRefreshBtn') && $('#payRefreshBtn').addEventListener('click', drawPaymentsTable);
+  $('#payDetailClose')&& $('#payDetailClose').addEventListener('click', () => { $('#payDetailBackdrop').classList.remove('show'); paySelectedEmp = null; });
+  $('#payDetailMark') && $('#payDetailMark').addEventListener('click', confirmMarkPaid);
+  $('#payDetailBackdrop') && $('#payDetailBackdrop').addEventListener('click', (e) => { if (e.target.id === 'payDetailBackdrop') { $('#payDetailBackdrop').classList.remove('show'); paySelectedEmp = null; } });
 
   boot();
 })();

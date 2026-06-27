@@ -261,4 +261,60 @@ function escapeHtml(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-module.exports = { sendSubmissionEmail, sendApprovalEmail, sendReturnedEmail };
+// Plain "your reimbursement has been paid" confirmation. Goes to the
+// employee with the month's total — that's it. No PDF attachments;
+// they can pull individual reports from the portal.
+async function sendPaymentEmail({ employee, year, month, amount, submissionCount }) {
+  if (!employee || !employee.email) return { skipped: true, reason: 'no-employee-email' };
+
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Bharat Steel Group Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+
+  const monthName = new Date(year, month - 1, 1).toLocaleString('en-IN', { month: 'long' });
+  const portalUrl = process.env.APP_URL || '';
+
+  const subject = `Reimbursement Paid · ${monthName} ${year}`;
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #059669; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">Bharat Steel Group · Expense Portal</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">Payment Made</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">Hi ${(employee.name || '').split(' ')[0] || 'there'},</p>
+  <p style="font-size: 14px; line-height: 1.6;">
+    Your reimbursement for <strong>${monthName} ${year}</strong> has been paid.
+  </p>
+
+  <div style="background: #ecfdf5; border-left: 4px solid #059669; padding: 18px 22px; margin: 22px 0; border-radius: 3px;">
+    <div style="font-size: 11px; font-family: monospace; letter-spacing: 0.1em; color: #065f46; text-transform: uppercase; margin-bottom: 6px;">Amount paid</div>
+    <div style="font-size: 28px; color: #0d1421; font-weight: 700;">₹ ${fmt(amount)}</div>
+    <div style="font-size: 12px; color: #6b7689; margin-top: 6px;">Covers ${submissionCount} ${submissionCount === 1 ? 'claim' : 'claims'} for ${monthName} ${year}.</div>
+  </div>
+
+  <p style="font-size: 13px; color: #6b7689; margin-top: 24px; line-height: 1.6;">
+    If you don't see the credit in your bank account within a couple of working days, please reach out to HR.
+  </p>
+
+  ${portalUrl ? `<p style="margin: 24px 0;"><a href="${portalUrl}" style="color: #2563eb; text-decoration: none; font-size: 13px;">Open the portal →</a></p>` : ''}
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    THE BHARAT STEEL GROUP · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to: employee.email,
+    subject,
+    html,
+  });
+  return { messageId: info.messageId, recipients: [employee.email] };
+}
+
+module.exports = { sendSubmissionEmail, sendApprovalEmail, sendReturnedEmail, sendPaymentEmail };

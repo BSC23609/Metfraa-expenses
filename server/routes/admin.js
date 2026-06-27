@@ -690,6 +690,202 @@ router.get('/dashboard', requireAdmin, (req, res) => {
   }
 });
 
+// ---- Monthly Payments -----------------------------------------------
+//
+//   GET  /api/admin/payments?year=YYYY&month=M
+//     → { year, month, period, employees: [{ id, name, email,
+//         total_payable, submission_count, submissions: [...], paid }] }
+//     Lists every employee who has at least one approved/settled
+//     submission for the given month, with their total payable and
+//     itemised breakdown. Each row carries a `paid` block when the
+//     month has been marked paid for that employee.
+//
+//   POST /api/admin/payments/mark
+//     Body: { employee_id, year, month }
+//     → marks the (employee, year, month) tuple as Paid using the
+//     payable total computed server-side at THIS moment (HR can't
+//     spoof the amount). Sends the employee a plain confirmation email
+//     fail-soft.
+//
+//   POST /api/admin/payments/unmark
+//     Body: { employee_id, year, month }
+//     → removes the paid row (toggle-off).
+// ---------------------------------------------------------------------
+
+// Compute the payable amount for a submission row. Approved claims pay
+// out at total_amount; settled travel advances pay out at the actuals
+// (which may be more or less than the requested advance). Everything
+// else returns 0 (caller should skip such rows).
+function payableAmountForRow(s) {
+  if (s.status === 'settled') {
+    try {
+      const a = JSON.parse(s.actuals_json || '{}');
+      const v = parseFloat(a.actual_amount);
+      return v > 0 ? v : 0;
+    } catch (_) { return 0; }
+  }
+  if (s.status === 'approved') return parseFloat(s.total_amount) || 0;
+  return 0;
+}
+
+// Compose the period stamp 'YYYY-MM' the same way the rest of the app
+// uses it. Pads month to 2 digits so this matches the submission's
+// stored period exactly.
+function makePeriodStamp(year, month) {
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+router.get('/payments', requireAdmin, (req, res) => {
+  try {
+    const year = parseInt(req.query.year, 10);
+    const month = parseInt(req.query.month, 10);
+    if (!Number.isFinite(year) || year < 2000 || year > 2100)
+      return res.status(400).json({ error: 'Valid year required (YYYY)' });
+    if (!Number.isFinite(month) || month < 1 || month > 12)
+      return res.status(400).json({ error: 'Valid month required (1–12)' });
+
+    const period = makePeriodStamp(year, month);
+    const rows = stmts.listApprovedSubmissionsForMonth.all(period);
+
+    // Group by employee, computing total + submissions per group
+    const buckets = new Map();
+    for (const s of rows) {
+      const amt = payableAmountForRow(s);
+      if (amt <= 0) continue;
+      let b = buckets.get(s.employee_id);
+      if (!b) {
+        b = {
+          id: s.employee_id,
+          name: s.employee_name,
+          email: s.employee_email,
+          total_payable: 0,
+          submission_count: 0,
+          submissions: [],
+        };
+        buckets.set(s.employee_id, b);
+      }
+      b.total_payable += amt;
+      b.submission_count++;
+      b.submissions.push({
+        id: s.id,
+        reference: s.reference,
+        form_type: s.form_type,
+        status: s.status,
+        payable_amount: +amt.toFixed(2),
+        submitted_at: s.submitted_at,
+      });
+    }
+
+    // Overlay paid status for each employee
+    const paidRows = stmts.listMonthlyPaymentsForMonth.all(year, month);
+    const paidBy = new Map();
+    for (const p of paidRows) paidBy.set(p.employee_id, p);
+
+    const employees = Array.from(buckets.values()).map(b => ({
+      id: b.id,
+      name: b.name,
+      email: b.email,
+      total_payable: +b.total_payable.toFixed(2),
+      submission_count: b.submission_count,
+      submissions: b.submissions,
+      paid: paidBy.has(b.id) ? {
+        amount_paid: paidBy.get(b.id).amount_paid,
+        paid_by: paidBy.get(b.id).paid_by,
+        paid_at: paidBy.get(b.id).paid_at,
+        email_sent_at: paidBy.get(b.id).email_sent_at,
+      } : null,
+    })).sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({ year, month, period, employees });
+  } catch (err) {
+    console.error('[payments-list]', err);
+    res.status(500).json({ error: err.message || 'Could not load payments' });
+  }
+});
+
+router.post('/payments/mark', requireAdmin, async (req, res) => {
+  try {
+    const employeeId = parseInt(req.body && req.body.employee_id, 10);
+    const year  = parseInt(req.body && req.body.year, 10);
+    const month = parseInt(req.body && req.body.month, 10);
+    if (!Number.isFinite(employeeId) || employeeId <= 0)
+      return res.status(400).json({ error: 'Valid employee_id required' });
+    if (!Number.isFinite(year) || year < 2000 || year > 2100)
+      return res.status(400).json({ error: 'Valid year required' });
+    if (!Number.isFinite(month) || month < 1 || month > 12)
+      return res.status(400).json({ error: 'Valid month required (1–12)' });
+
+    // Recompute the total server-side (don't trust a client-supplied amount).
+    const period = makePeriodStamp(year, month);
+    const rows = stmts.listApprovedSubmissionsForMonth.all(period)
+      .filter(r => r.employee_id === employeeId);
+    let total = 0;
+    for (const r of rows) total += payableAmountForRow(r);
+    if (!(total > 0)) return res.status(400).json({ error: 'No approved/settled submissions to pay for this employee × month.' });
+
+    stmts.markMonthlyPaid.run({
+      employee_id: employeeId, year, month,
+      amount_paid: +total.toFixed(2),
+      paid_by: req.user.email,
+    });
+
+    // Find the employee for the email
+    const emp = stmts.getEmployeeById.get(employeeId);
+
+    // Fire the confirmation email (fail-soft — payment status is recorded
+    // regardless of whether the email actually went out).
+    let emailErr = null;
+    try {
+      const { sendPaymentEmail } = require('../services/email');
+      await sendPaymentEmail({
+        employee: emp,
+        year, month,
+        amount: +total.toFixed(2),
+        submissionCount: rows.length,
+      });
+      stmts.markPaymentEmailSent.run(employeeId, year, month);
+    } catch (e) {
+      emailErr = e.message || String(e);
+      try { stmts.markPaymentEmailFailed.run(emailErr.slice(0, 480), employeeId, year, month); } catch (_) {}
+      console.error('[payments-email]', e);
+    }
+
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'MARK_PAID', target_type: 'monthly_payment',
+      target_id: 0,
+      meta_json: JSON.stringify({ employee_id: employeeId, year, month, amount: +total.toFixed(2), email_err: emailErr }),
+      ip_address: req.ip,
+    });
+
+    res.json({ ok: true, employee_id: employeeId, year, month, amount_paid: +total.toFixed(2), email_sent: !emailErr, email_error: emailErr });
+  } catch (err) {
+    console.error('[payments-mark]', err);
+    res.status(500).json({ error: err.message || 'Mark-paid failed' });
+  }
+});
+
+router.post('/payments/unmark', requireAdmin, (req, res) => {
+  try {
+    const employeeId = parseInt(req.body && req.body.employee_id, 10);
+    const year  = parseInt(req.body && req.body.year, 10);
+    const month = parseInt(req.body && req.body.month, 10);
+    if (!Number.isFinite(employeeId) || !Number.isFinite(year) || !Number.isFinite(month))
+      return res.status(400).json({ error: 'employee_id, year, month all required' });
+
+    const r = stmts.unmarkMonthlyPaid.run(employeeId, year, month);
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'UNMARK_PAID', target_type: 'monthly_payment',
+      target_id: 0,
+      meta_json: JSON.stringify({ employee_id: employeeId, year, month }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true, removed: r.changes > 0 });
+  } catch (err) {
+    console.error('[payments-unmark]', err);
+    res.status(500).json({ error: err.message || 'Unmark failed' });
+  }
+});
+
 // ---- Audit log -----------------------------------------------------
 router.get('/audit', requireAdmin, (req, res) => {
   res.json({ audit: db.prepare(`SELECT * FROM audit_log ORDER BY id DESC LIMIT 500`).all() });

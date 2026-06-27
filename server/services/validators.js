@@ -16,6 +16,18 @@ function isPositiveNonZero(v) { const n = parseFloat(v); return !isNaN(n) && n >
 function err(msg) { return { ok: false, error: msg }; }
 function ok(payload, total) { return { ok: true, payload, total }; }
 
+// Convert an ISO date string ('YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS') to
+// a period stamp 'YYYY-MM'. Returns null if the input isn't a valid date.
+// Used by forms that don't ask the employee for a period directly but
+// still need one for filtering / payment grouping (e.g. Travel Advance
+// uses the trip start date, Cab uses the cab date, Misc uses the first
+// item's date).
+function periodFromDate(d) {
+  if (typeof d !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})/.exec(d.trim());
+  return m ? `${m[1]}-${m[2]}` : null;
+}
+
 // ---- BSC: Local Conveyance ----------------------------------------
 function validateBscConveyance(input, employee) {
   const formMeta = getForm('bsc', 'conveyance');
@@ -178,7 +190,15 @@ function validateMetCab(input, employee) {
       notes: isStr(r.notes) ? r.notes.trim() : '',
     });
   }
-  return ok({ rides, period: input.period || '' }, +total.toFixed(2));
+  // If the form didn't supply an explicit period, derive one from the
+  // EARLIEST ride date so the submission groups correctly in the admin
+  // month filter / payments tab.
+  let derivedPeriod = isStr(input.period) ? input.period : null;
+  if (!derivedPeriod && rides.length) {
+    const earliestDate = rides.map(r => r.date).filter(Boolean).sort()[0];
+    derivedPeriod = periodFromDate(earliestDate);
+  }
+  return ok({ rides, period: derivedPeriod || '' }, +total.toFixed(2));
 }
 
 // ---- Metfraa: Monthly Accommodation -------------------------------
@@ -279,7 +299,14 @@ function validateMetMisc(input, employee) {
     total += amount;
     items.push({ date: it.date, purpose: it.purpose.trim(), amount: +amount.toFixed(2) });
   }
-  return ok({ items, period: input.period || '' }, +total.toFixed(2));
+  // Derive period from earliest item date if not supplied (so the admin
+  // month filter / payments tab can group Misc submissions correctly).
+  let derivedPeriod = isStr(input.period) ? input.period : null;
+  if (!derivedPeriod && items.length) {
+    const earliestDate = items.map(i => i.date).filter(Boolean).sort()[0];
+    derivedPeriod = periodFromDate(earliestDate);
+  }
+  return ok({ items, period: derivedPeriod || '' }, +total.toFixed(2));
 }
 
 // ---- Metfraa: Travel Advance Request -------------------------------
@@ -299,6 +326,9 @@ function validateMetAdvance(input, employee) {
     mode:        (input.mode || '').trim() || null,   // optional: train / bus / car / flight / other
     notes:       (input.notes || '').trim() || null,
     amount:      +amount.toFixed(2),
+    // For filtering / payments: the trip's start month IS the logical
+    // "period" of this advance — that's the month it'll be settled into.
+    period:      periodFromDate(input.travel_from) || '',
   }, +amount.toFixed(2));
 }
 

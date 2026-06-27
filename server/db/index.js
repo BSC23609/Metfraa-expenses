@@ -195,6 +195,81 @@ db.exec(`
   const pcols = db.prepare(`PRAGMA table_info(pending_uploads)`).all().map(c => c.name);
   if (!pcols.includes('row_idx')) db.exec(`ALTER TABLE pending_uploads ADD COLUMN row_idx INTEGER`);
 
+  // Monthly payments — one row per (employee, year, month) when HR marks
+  // the payout complete. Absence of a row = unpaid.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS monthly_payments (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id    INTEGER NOT NULL,
+      year           INTEGER NOT NULL,
+      month          INTEGER NOT NULL,           -- 1..12
+      amount_paid    REAL NOT NULL,              -- ₹ total at the moment of marking
+      paid_by        TEXT NOT NULL,              -- admin email
+      paid_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      email_sent_at  TEXT,
+      email_error    TEXT,
+      UNIQUE (employee_id, year, month),
+      FOREIGN KEY (employee_id) REFERENCES employees(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_monthly_payments_employee ON monthly_payments(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_monthly_payments_period   ON monthly_payments(year, month);
+  `);
+
+  // Backfill 'period' for older submissions that were created BEFORE the
+  // validators derived a period from travel/cab/misc dates. Walks every
+  // row with NULL period, parses payload_json, picks a sensible date
+  // based on form_type, and writes 'YYYY-MM'. Idempotent — only touches
+  // NULL rows, so re-running is a no-op.
+  try {
+    const rows = db.prepare(`
+      SELECT id, form_type, payload_json
+      FROM submissions
+      WHERE period IS NULL OR period = ''
+    `).all();
+    const updateStmt = db.prepare(`UPDATE submissions SET period = ? WHERE id = ?`);
+    const monthOf = (iso) => {
+      if (typeof iso !== 'string') return null;
+      const m = /^(\d{4})-(\d{2})/.exec(iso.trim());
+      return m ? `${m[1]}-${m[2]}` : null;
+    };
+    let backfilled = 0;
+    for (const r of rows) {
+      let pl;
+      try { pl = JSON.parse(r.payload_json || '{}'); } catch (_) { continue; }
+      let p = null;
+      switch (r.form_type) {
+        case 'met_advance':
+          p = monthOf(pl.travel_from);
+          break;
+        case 'met_cab': {
+          const dates = (pl.rides || []).map(x => x.date).filter(Boolean).sort();
+          p = dates.length ? monthOf(dates[0]) : null;
+          break;
+        }
+        case 'met_misc': {
+          const dates = (pl.items || []).map(x => x.date).filter(Boolean).sort();
+          p = dates.length ? monthOf(dates[0]) : null;
+          break;
+        }
+        case 'met_dtr': {
+          // DTR sets period on the payload but if it's missing, use earliest entry
+          if (pl.period) { p = pl.period; break; }
+          const dates = (pl.entries || []).map(x => x.date).filter(Boolean).sort();
+          p = dates.length ? monthOf(dates[0]) : null;
+          break;
+        }
+        default:
+          // Other forms (local, accommodation, outstation) already set period
+          // explicitly. If they're NULL, try the payload's own period field.
+          if (pl.period) p = pl.period;
+      }
+      if (p) { updateStmt.run(p, r.id); backfilled++; }
+    }
+    if (backfilled) console.log(`[migration] backfilled period on ${backfilled} submission(s)`);
+  } catch (e) {
+    console.error('[migration] period backfill failed:', e.message);
+  }
+
   // Seed starter projects if the table is empty. Once admin starts managing
   // them this block does nothing (we only seed when count is zero, not when
   // a specific code is missing — so the admin can delete defaults safely).
@@ -409,6 +484,51 @@ const createSubmissionTx = db.transaction((submission, attachments) => {
     });
   }
   return submissionId;
+});
+
+// ---- Monthly payments statements ----------------------------------
+//  Augments the stmts object with payment-tracking queries. Kept here
+//  (after the main block) just for readability — they all touch the
+//  monthly_payments table which is created by the migration above.
+Object.assign(stmts, {
+  getMonthlyPayment: db.prepare(`
+    SELECT * FROM monthly_payments WHERE employee_id = ? AND year = ? AND month = ?
+  `),
+  listMonthlyPaymentsForMonth: db.prepare(`
+    SELECT mp.*, e.name AS employee_name, e.email AS employee_email
+    FROM monthly_payments mp
+    JOIN employees e ON e.id = mp.employee_id
+    WHERE mp.year = ? AND mp.month = ?
+  `),
+  // Mark an employee × month as PAID. UPSERT so toggling off + on
+  // refreshes paid_by / paid_at to the latest action.
+  markMonthlyPaid: db.prepare(`
+    INSERT INTO monthly_payments (employee_id, year, month, amount_paid, paid_by)
+    VALUES (@employee_id, @year, @month, @amount_paid, @paid_by)
+    ON CONFLICT(employee_id, year, month)
+    DO UPDATE SET amount_paid = excluded.amount_paid, paid_by = excluded.paid_by,
+                  paid_at = datetime('now'), email_error = NULL
+  `),
+  // Undo: remove the payment row entirely so the month is unpaid again.
+  unmarkMonthlyPaid: db.prepare(`
+    DELETE FROM monthly_payments WHERE employee_id = ? AND year = ? AND month = ?
+  `),
+  markPaymentEmailSent:   db.prepare(`UPDATE monthly_payments SET email_sent_at = datetime('now'), email_error = NULL WHERE employee_id = ? AND year = ? AND month = ?`),
+  markPaymentEmailFailed: db.prepare(`UPDATE monthly_payments SET email_error = ? WHERE employee_id = ? AND year = ? AND month = ?`),
+
+  // List approved/settled submissions for a given month — used to
+  // compute each employee's payable total. Settled travel advances use
+  // the actual amount (not the originally-requested advance).
+  listApprovedSubmissionsForMonth: db.prepare(`
+    SELECT s.id, s.reference, s.employee_id, s.form_type, s.period,
+           s.total_amount, s.status, s.actuals_json, s.submitted_at,
+           e.name AS employee_name, e.email AS employee_email
+    FROM submissions s
+    JOIN employees e ON e.id = s.employee_id
+    WHERE s.period = ?
+      AND s.status IN ('approved', 'settled')
+    ORDER BY e.name ASC, s.submitted_at DESC
+  `),
 });
 
 module.exports = {

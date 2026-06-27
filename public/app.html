@@ -308,6 +308,7 @@
       <button class="admin-tab" data-tab="submissions">All Submissions</button>
       <button class="admin-tab" data-tab="employees">Employees</button>
       <button class="admin-tab" data-tab="projects">Projects</button>
+      <button class="admin-tab" data-tab="payments">Payments</button>
     </div>
 
     <!-- TAB: Dashboard -->
@@ -448,6 +449,33 @@
         </div>
       </div>
     </div>
+
+    <!-- TAB: Payments -->
+    <div class="admin-tabpane" id="tab-payments">
+      <div class="admin-toolbar">
+        <label for="payMonth" style="font-size:11px;font-family:'JetBrains Mono',monospace;letter-spacing:0.05em;color:var(--bsg-muted);text-transform:uppercase;font-weight:600;">Month</label>
+        <input type="month" id="payMonth" class="admin-search" style="flex:0 0 180px;" />
+        <span class="admin-count" id="payCount"></span>
+        <button class="btn btn-ghost" id="payRefreshBtn" style="margin-left:auto;">Refresh</button>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="overflow-x:auto;">
+          <table class="admin-table" id="payTable">
+            <thead>
+              <tr>
+                <th>Employee</th>
+                <th style="text-align:right;">Total Payable</th>
+                <th>Claims</th>
+                <th>Status</th>
+                <th>Paid On</th>
+                <th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="payTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -557,6 +585,24 @@
     <div class="actions">
       <button class="btn btn-ghost" id="viewClose">Close</button>
       <button class="btn btn-submit" id="viewDownload">Download PDF</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== PAYMENT DETAIL MODAL ============== -->
+<div class="modal-backdrop" id="payDetailBackdrop">
+  <div class="modal modal-wide" id="payDetailModal">
+    <div class="view-modal-head">
+      <div>
+        <div class="view-modal-ref" id="payDetailEmp">—</div>
+        <h3 id="payDetailMonth" style="margin:2px 0 0;">Month</h3>
+      </div>
+      <span class="status-pill" id="payDetailStatusPill">—</span>
+    </div>
+    <div class="view-modal-body" id="payDetailBody"></div>
+    <div class="actions">
+      <button class="btn btn-ghost" id="payDetailClose">Close</button>
+      <button class="btn btn-submit" id="payDetailMark">Mark as Paid &amp; Send Email</button>
     </div>
   </div>
 </div>
