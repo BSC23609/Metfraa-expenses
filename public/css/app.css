@@ -2056,3 +2056,119 @@ body::after {
   font-size: 11px; color: #92400e;
   margin-top: 8px;
 }
+
+/* ---- Folder-style admin tabs (Pending + All Submissions) ----------- */
+.employee-folders {
+  display: flex; flex-direction: column;
+  gap: 10px;
+}
+.emp-folder {
+  background: #fff;
+  border: 1px solid var(--bsg-line);
+  border-radius: 4px;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.emp-folder:hover { border-color: rgba(37,99,235,0.4); }
+.emp-folder-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s;
+}
+.emp-folder-head:hover { background: rgba(37,99,235,0.04); }
+.emp-folder.open .emp-folder-head {
+  border-bottom: 1px solid var(--bsg-line);
+  background: rgba(37,99,235,0.03);
+}
+.efh-left {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 0; flex: 1;
+}
+.efh-caret {
+  display: inline-block;
+  font-size: 9px;
+  color: var(--bsg-muted);
+  transition: transform 0.15s;
+  width: 12px;
+  text-align: center;
+}
+.emp-folder.open .efh-caret { transform: rotate(90deg); }
+.efh-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--bsg-ink);
+}
+.efh-email {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--bsg-muted);
+}
+.efh-right {
+  display: flex; align-items: center; gap: 12px;
+  flex-shrink: 0;
+}
+.efh-total {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  color: var(--bsg-ink);
+  font-weight: 600;
+}
+.efh-badge {
+  display: inline-block;
+  background: var(--bsg-blue);
+  color: #fff;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 22px;
+  text-align: center;
+}
+.efh-badge.zero {
+  background: var(--bsg-muted);
+}
+.emp-folder-body {
+  display: none;
+  padding: 0;
+}
+.emp-folder.open .emp-folder-body { display: block; }
+.emp-no-match {
+  padding: 16px 18px;
+  font-size: 13px;
+  color: var(--bsg-muted);
+  font-style: italic;
+}
+.folder-table {
+  width: 100%;
+  margin: 0;
+  border: 0;
+}
+.folder-table thead th {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bsg-muted);
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 14px;
+  background: #fafbfc;
+  border-bottom: 1px solid var(--bsg-line);
+}
+.folder-table tbody td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f2f4f7;
+  font-size: 13px;
+  color: var(--bsg-ink);
+  vertical-align: middle;
+}
+.folder-table tbody tr:last-child td { border-bottom: 0; }
+.folder-table tbody tr:hover { background: rgba(37,99,235,0.03); }
+.empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--bsg-muted);
+  font-size: 14px;
+}

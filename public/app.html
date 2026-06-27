@@ -358,54 +358,43 @@
       </div>
     </div>
 
-    <!-- TAB: Pending Approvals -->
+    <!-- TAB: Pending Approvals (folder-style by employee) -->
     <div class="admin-tabpane" id="tab-pending">
       <div class="admin-toolbar">
-        <input type="text" id="pendSearch" class="admin-search" placeholder="Search pending by name, reference, form…" />
+        <input type="text" id="pendSearch" class="admin-search" placeholder="Search by employee or reference…" />
+        <select id="pendFormFilter" class="admin-search" style="flex:0 0 200px;">
+          <option value="">All expense types</option>
+        </select>
         <span class="admin-count" id="pendCount"></span>
-      </div>
-      <div class="card" style="padding:0;overflow:hidden;">
-        <div style="overflow-x:auto;">
-          <table class="admin-table" id="pendTable">
-            <thead>
-              <tr>
-                <th>Reference</th><th>Employee</th><th>Form</th><th>Period</th>
-                <th style="text-align:right;">Amount</th><th>Submitted</th>
-                <th style="text-align:right;">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="pendTableBody"></tbody>
-          </table>
+        <div style="margin-left:auto;display:flex;gap:6px;">
+          <button class="btn btn-ghost" id="pendExpandAll" type="button">Expand all</button>
+          <button class="btn btn-ghost" id="pendCollapseAll" type="button">Collapse all</button>
         </div>
       </div>
+      <div id="pendFolders" class="employee-folders"></div>
     </div>
 
-    <!-- TAB: All Submissions -->
+    <!-- TAB: All Submissions (folder-style by employee) -->
     <div class="admin-tabpane" id="tab-submissions">
       <div class="admin-toolbar">
-        <input type="text" id="subSearch" class="admin-search" placeholder="Search by name, reference, status…" />
-        <select id="subStatusFilter" class="admin-search" style="flex:0 0 180px;">
+        <input type="text" id="subSearch" class="admin-search" placeholder="Search by employee or reference…" />
+        <select id="subStatusFilter" class="admin-search" style="flex:0 0 160px;">
           <option value="">All statuses</option>
           <option value="pending">Pending</option>
           <option value="approved">Approved</option>
-          <option value="rejected">Rejected</option>
+          <option value="draft">Needs edits</option>
+          <option value="rejected">Rejected (legacy)</option>
+        </select>
+        <select id="subFormFilter" class="admin-search" style="flex:0 0 200px;">
+          <option value="">All expense types</option>
         </select>
         <span class="admin-count" id="subCount"></span>
-      </div>
-      <div class="card" style="padding:0;overflow:hidden;">
-        <div style="overflow-x:auto;">
-          <table class="admin-table" id="subTable">
-            <thead>
-              <tr>
-                <th>Reference</th><th>Employee</th><th>Form</th><th>Period</th>
-                <th style="text-align:right;">Amount</th><th>Status</th><th>Submitted</th>
-                <th style="text-align:right;">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="subTableBody"></tbody>
-          </table>
+        <div style="margin-left:auto;display:flex;gap:6px;">
+          <button class="btn btn-ghost" id="subExpandAll" type="button">Expand all</button>
+          <button class="btn btn-ghost" id="subCollapseAll" type="button">Collapse all</button>
         </div>
       </div>
+      <div id="subFolders" class="employee-folders"></div>
     </div>
 
     <!-- TAB: Employees -->

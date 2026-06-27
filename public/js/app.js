@@ -2879,38 +2879,182 @@
     }
   }
 
-  function drawPendingTable() {
-    const tbody = $('#pendTableBody');
-    if (!tbody) return;
-    const q = ($('#pendSearch') ? $('#pendSearch').value : '').toLowerCase().trim();
-    const rows = (state.adminPending || []).filter(s => {
-      if (!q) return true;
-      return [s.employee_name, s.reference, s.form_type, s.period].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
-    });
-    $('#pendCount').textContent = `${rows.length} pending`;
-    tbody.innerHTML = '';
-    for (const s of rows) {
-      const isSettlement = s.status === 'settlement_pending';
-      tbody.appendChild(el('tr', {},
-        el('td', {},
-          el('strong', {}, s.reference),
-          isSettlement ? el('span', { class: 'status-pill settlement_pending', style: 'margin-left:8px;font-size:9px;' }, 'settlement') : null
-        ),
-        el('td', {}, s.employee_name),
-        el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
-        el('td', {}, s.period || '—'),
-        el('td', { class: 'num', style: 'text-align:right;' }, '₹ ' + fmt(s.total_amount)),
-        el('td', {}, fmtDateShort(s.submitted_at)),
-        el('td', {},
-          el('div', { class: 'admin-actions' },
-            el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
-            el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : 'Approve'),
-            el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, isSettlement ? 'Reject Settlement' : 'Send back')
-          )
-        )
-      ));
+  // Per-tab folder open/closed state. Keyed by employee email so the
+  // expanded/collapsed view survives any re-render (approve, refresh,
+  // filter change). New employees default to OPEN.
+  const folderState = { pend: new Map(), sub: new Map() };
+
+  // Group an array of submission rows by employee, return [{ key, name,
+  // email, code, subs: [], total: 0, count: 0 }] sorted A→Z by name.
+  // Submissions inside each bucket are sorted newest first.
+  function groupByEmployee(rows) {
+    const buckets = new Map();
+    for (const r of rows) {
+      const key = (r.employee_email || r.employee_name || 'unknown').toLowerCase();
+      let b = buckets.get(key);
+      if (!b) {
+        b = {
+          key,
+          name: r.employee_name || '(unknown)',
+          email: r.employee_email || '',
+          subs: [],
+        };
+        buckets.set(key, b);
+      }
+      b.subs.push(r);
     }
-    if (!rows.length) tbody.appendChild(el('tr', {}, el('td', { colspan: 7, style: 'text-align:center;color:var(--bsg-muted);padding:32px;' }, q ? 'No matches.' : 'Nothing pending. ')));
+    for (const b of buckets.values()) {
+      // Newest first
+      b.subs.sort((a, b2) => {
+        const ta = new Date(a.submitted_at || 0).getTime() || 0;
+        const tb = new Date(b2.submitted_at || 0).getTime() || 0;
+        return tb - ta;
+      });
+    }
+    return Array.from(buckets.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // Build the form-type filter dropdown from whatever forms appear in
+  // the supplied rows. Avoids hard-coding a list that could drift; also
+  // keeps the dropdown short to what's actually in use.
+  function populateFormFilter(selectEl, rows) {
+    if (!selectEl) return;
+    const current = selectEl.value;
+    const seen = new Set();
+    for (const r of rows) if (r.form_type) seen.add(r.form_type);
+    // Preserve the leading "All expense types" option
+    selectEl.innerHTML = '<option value="">All expense types</option>'
+      + Array.from(seen).sort().map(ft =>
+          `<option value="${ft}"${ft === current ? ' selected' : ''}>${FORM_LABEL[ft] || ft}</option>`
+        ).join('');
+  }
+
+  // Renders the row of action buttons for a submission inside a folder.
+  function renderRowActions(s) {
+    const isSettlement = s.status === 'settlement_pending';
+    const isPending = s.status === 'pending' || s.status === 'settlement_pending';
+    return el('div', { class: 'admin-actions' },
+      el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
+      isPending ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : 'Approve') : null,
+      isPending ? el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, isSettlement ? 'Reject Settlement' : 'Send back') : null,
+    );
+  }
+
+  // Single submission row inside a folder body. Columns vary slightly
+  // by tab — `withStatus` adds a status pill column for All Submissions.
+  function buildFolderRow(s, opts = {}) {
+    const isSettlement = s.status === 'settlement_pending';
+    const cells = [
+      el('td', {},
+        el('strong', {}, s.reference),
+        isSettlement ? el('span', { class: 'status-pill settlement_pending', style: 'margin-left:8px;font-size:9px;' }, 'settlement') : null,
+      ),
+      el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
+      el('td', {}, s.period || '—'),
+      el('td', { class: 'num', style: 'text-align:right;' }, '₹ ' + fmt(s.total_amount)),
+    ];
+    if (opts.withStatus) {
+      cells.push(el('td', {}, el('span', { class: 'status-pill ' + s.status }, statusLabel(s.status))));
+    }
+    cells.push(el('td', {}, fmtDateShort(s.submitted_at)));
+    cells.push(el('td', { style: 'text-align:right;' }, renderRowActions(s)));
+    return el('tr', { class: 'fr-row' }, ...cells);
+  }
+
+  // The whole folder UI for one employee. tabKey is 'pend' or 'sub' so
+  // open/close state persists per tab independently.
+  function buildEmployeeFolder({ tabKey, bucket, matchingSubs, totalSubs, withStatus }) {
+    const stateMap = folderState[tabKey];
+    if (!stateMap.has(bucket.key)) stateMap.set(bucket.key, true); // default OPEN
+
+    const folder = el('div', { class: 'emp-folder' });
+    const folderId = `${tabKey}-folder-${bucket.key.replace(/[^a-z0-9]/g, '_')}`;
+    folder.id = folderId;
+    if (stateMap.get(bucket.key)) folder.classList.add('open');
+
+    // Header: caret + name + count badge + total ₹
+    const totalAmt = matchingSubs.reduce((s, r) => s + (parseFloat(r.total_amount) || 0), 0);
+    const head = el('div', { class: 'emp-folder-head', onclick: () => {
+      const isOpen = folder.classList.toggle('open');
+      stateMap.set(bucket.key, isOpen);
+    } },
+      el('div', { class: 'efh-left' },
+        el('span', { class: 'efh-caret' }, '▶'),
+        el('div', { class: 'efh-name' }, bucket.name),
+        bucket.email ? el('div', { class: 'efh-email' }, bucket.email) : null,
+      ),
+      el('div', { class: 'efh-right' },
+        el('span', { class: 'efh-total' }, '₹ ' + fmt(totalAmt)),
+        el('span', { class: 'efh-badge' + (matchingSubs.length === 0 ? ' zero' : '') },
+          matchingSubs.length === totalSubs
+            ? String(matchingSubs.length)
+            : `${matchingSubs.length} / ${totalSubs}`
+        ),
+      )
+    );
+    folder.appendChild(head);
+
+    // Body: either the rows table or a "no matches" notice
+    const body = el('div', { class: 'emp-folder-body' });
+    if (matchingSubs.length === 0) {
+      body.appendChild(el('div', { class: 'emp-no-match' }, 'No submissions match the current filter.'));
+    } else {
+      const table = el('table', { class: 'admin-table folder-table' });
+      const headCells = ['Reference', 'Form', 'Period', 'Amount'];
+      if (withStatus) headCells.push('Status');
+      headCells.push('Submitted', 'Actions');
+      table.appendChild(el('thead', {}, el('tr', {},
+        ...headCells.map((h, i) => el('th', { style: i === 3 ? 'text-align:right;' : (i === headCells.length - 1 ? 'text-align:right;' : '') }, h))
+      )));
+      const tbody = el('tbody');
+      for (const s of matchingSubs) tbody.appendChild(buildFolderRow(s, { withStatus }));
+      table.appendChild(tbody);
+      body.appendChild(table);
+    }
+    folder.appendChild(body);
+    return folder;
+  }
+
+  // ---- Pending: folder-style render ---------------------------------
+  function drawPendingTable() {
+    const root = $('#pendFolders');
+    if (!root) return;
+    const all = state.adminPending || [];
+    populateFormFilter($('#pendFormFilter'), all);
+
+    const q = ($('#pendSearch') ? $('#pendSearch').value : '').toLowerCase().trim();
+    const formFilter = ($('#pendFormFilter') ? $('#pendFormFilter').value : '');
+
+    // Two passes: textual search filter applies to the WHOLE folder
+    // (any field match keeps the row), form-type filter applies WITHIN
+    // a folder (other rows still count toward the parent total).
+    const textMatch = (s) => {
+      if (!q) return true;
+      return [s.employee_name, s.employee_email, s.reference, s.form_type, s.period].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
+    };
+    const formMatch = (s) => !formFilter || s.form_type === formFilter;
+
+    const filtered = all.filter(textMatch);
+    const buckets = groupByEmployee(filtered);
+
+    let totalMatching = 0;
+    root.innerHTML = '';
+    if (!buckets.length) {
+      root.appendChild(el('div', { class: 'empty-state' }, q ? 'No matches.' : 'Nothing pending.'));
+    } else {
+      for (const b of buckets) {
+        const matching = b.subs.filter(formMatch);
+        totalMatching += matching.length;
+        root.appendChild(buildEmployeeFolder({
+          tabKey: 'pend', bucket: b,
+          matchingSubs: matching, totalSubs: b.subs.length,
+          withStatus: false,
+        }));
+      }
+    }
+    $('#pendCount').textContent = formFilter
+      ? `${totalMatching} pending · filtered`
+      : `${all.length} pending across ${buckets.length} ${buckets.length === 1 ? 'employee' : 'employees'}`;
   }
 
   // ---- All submissions ----------------------------------------------
@@ -2923,34 +3067,62 @@
   }
 
   function drawSubmissionsTable() {
-    const tbody = $('#subTableBody');
-    if (!tbody) return;
+    const root = $('#subFolders');
+    if (!root) return;
+    const all = state.adminSubmissions || [];
+    populateFormFilter($('#subFormFilter'), all);
+
     const q = ($('#subSearch') ? $('#subSearch').value : '').toLowerCase().trim();
-    const rows = (state.adminSubmissions || []).filter(s => {
+    const formFilter = ($('#subFormFilter') ? $('#subFormFilter').value : '');
+
+    const textMatch = (s) => {
       if (!q) return true;
-      return [s.employee_name, s.reference, s.status, s.form_type].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
-    });
-    $('#subCount').textContent = `${rows.length} shown`;
-    tbody.innerHTML = '';
-    for (const s of rows) {
-      tbody.appendChild(el('tr', {},
-        el('td', {}, el('strong', {}, s.reference)),
-        el('td', {}, s.employee_name),
-        el('td', {}, FORM_LABEL[s.form_type] || s.form_type),
-        el('td', {}, s.period || '—'),
-        el('td', { class: 'num', style: 'text-align:right;' }, '₹ ' + fmt(s.total_amount)),
-        el('td', {}, el('span', { class: 'status-pill ' + s.status }, statusLabel(s.status))),
-        el('td', {}, fmtDateShort(s.submitted_at)),
-        el('td', {},
-          el('div', { class: 'admin-actions' },
-            el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
-            s.status === 'pending' ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, 'Approve') : null,
-            s.status === 'pending' ? el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, 'Send back') : null
-          )
-        )
-      ));
+      return [s.employee_name, s.employee_email, s.reference, s.status, s.form_type, s.period].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
+    };
+    const formMatch = (s) => !formFilter || s.form_type === formFilter;
+
+    const filtered = all.filter(textMatch);
+    const buckets = groupByEmployee(filtered);
+
+    let totalMatching = 0;
+    root.innerHTML = '';
+    if (!buckets.length) {
+      root.appendChild(el('div', { class: 'empty-state' }, q ? 'No matches.' : 'No submissions yet.'));
+    } else {
+      for (const b of buckets) {
+        const matching = b.subs.filter(formMatch);
+        totalMatching += matching.length;
+        root.appendChild(buildEmployeeFolder({
+          tabKey: 'sub', bucket: b,
+          matchingSubs: matching, totalSubs: b.subs.length,
+          withStatus: true,
+        }));
+      }
     }
-    if (!rows.length) tbody.appendChild(el('tr', {}, el('td', { colspan: 8, style: 'text-align:center;color:var(--bsg-muted);padding:32px;' }, 'No submissions.')));
+    $('#subCount').textContent = formFilter
+      ? `${totalMatching} shown · filtered`
+      : `${all.length} across ${buckets.length} ${buckets.length === 1 ? 'employee' : 'employees'}`;
+  }
+
+  // Bulk expand/collapse helpers — flips every bucket on the given tab.
+  function setAllFolders(tabKey, open) {
+    const stateMap = folderState[tabKey];
+    const rootSel = tabKey === 'pend' ? '#pendFolders' : '#subFolders';
+    const root = $(rootSel);
+    if (!root) return;
+    // Update stored state first so future re-renders honour the bulk action.
+    // We can't enumerate stateMap keys reliably (covers buckets we've rendered
+    // before), so walk the rendered folders instead — they're the source of
+    // truth for what's on screen right now.
+    for (const folder of root.querySelectorAll('.emp-folder')) {
+      const key = folder.id.replace(new RegExp('^' + tabKey + '-folder-'), '').replace(/_/g, '');
+      // Re-derive the bucket key from the dataset would be cleaner; the
+      // class flip is what the user actually sees, so the source of truth
+      // is the DOM.
+      folder.classList.toggle('open', open);
+    }
+    // Walk stored state too so anything filtered out keeps its new mode
+    for (const k of stateMap.keys()) stateMap.set(k, open);
   }
 
   async function approveSubmission(s) {
@@ -3567,8 +3739,14 @@
   });
   // Pending + Submissions search / filter
   $('#pendSearch') && $('#pendSearch').addEventListener('input', drawPendingTable);
+  $('#pendFormFilter') && $('#pendFormFilter').addEventListener('change', drawPendingTable);
+  $('#pendExpandAll')  && $('#pendExpandAll').addEventListener('click',  () => setAllFolders('pend', true));
+  $('#pendCollapseAll')&& $('#pendCollapseAll').addEventListener('click', () => setAllFolders('pend', false));
   $('#subSearch') && $('#subSearch').addEventListener('input', drawSubmissionsTable);
+  $('#subFormFilter') && $('#subFormFilter').addEventListener('change', drawSubmissionsTable);
   $('#subStatusFilter') && $('#subStatusFilter').addEventListener('change', async () => { await loadSubmissions(); drawSubmissionsTable(); });
+  $('#subExpandAll')   && $('#subExpandAll').addEventListener('click',  () => setAllFolders('sub', true));
+  $('#subCollapseAll') && $('#subCollapseAll').addEventListener('click', () => setAllFolders('sub', false));
 
   boot();
 })();
