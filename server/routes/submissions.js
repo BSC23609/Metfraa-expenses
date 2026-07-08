@@ -110,6 +110,7 @@ router.post('/', requireAuth, async (req, res) => {
     const purposeCategory = v.meta && v.meta.purpose_category ? v.meta.purpose_category : null;
     let projectId   = v.meta && v.meta.project_id != null ? v.meta.project_id : null;
     const clientName  = v.meta && v.meta.client_name ? v.meta.client_name : null;
+    const purposeOtherReason = v.meta && v.meta.purpose_other_reason ? v.meta.purpose_other_reason : null;
     // Validate the project_id exists + is active (defence in depth — the
     // frontend already filters to active ones, but the API must not trust it).
     if (projectId != null) {
@@ -129,6 +130,7 @@ router.post('/', requireAuth, async (req, res) => {
       total_amount: v.total,
       pdf_path: null,
       purpose_category: purposeCategory,
+      purpose_other_reason: purposeOtherReason,
       project_id: projectId,
       client_name: clientName,
     };
@@ -343,6 +345,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
     const purposeCategory = v.meta && v.meta.purpose_category ? v.meta.purpose_category : null;
     let projectId   = v.meta && v.meta.project_id != null ? v.meta.project_id : null;
     const clientName  = v.meta && v.meta.client_name ? v.meta.client_name : null;
+    const purposeOtherReason = v.meta && v.meta.purpose_other_reason ? v.meta.purpose_other_reason : null;
     if (projectId != null) {
       const proj = stmts.getProject.get(projectId);
       if (!proj || !proj.is_active) {
@@ -358,6 +361,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
         payload_json: JSON.stringify(v.payload),
         total_amount: v.total,
         purpose_category: purposeCategory,
+        purpose_other_reason: purposeOtherReason,
         project_id: projectId,
         client_name: clientName,
       });
@@ -627,6 +631,7 @@ router.get('/:id', requireAuth, (req, res) => {
       changes_required: sub.changes_required, returned_at: sub.returned_at,
       // Categorization
       purpose_category: sub.purpose_category,
+      purpose_other_reason: sub.purpose_other_reason,
       project: project ? { id: project.id, code: project.code, name: project.name } : null,
       client_name: sub.client_name,
       dtr_project_lookup: dtrProjectLookup,

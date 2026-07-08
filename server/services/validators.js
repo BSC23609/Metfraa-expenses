@@ -368,31 +368,29 @@ function validateMetDtr(input, employee) {
     if (!purpose)                              return err(`${rowLbl}: pick a Purpose.`);
     if (!PURPOSE_CATEGORIES.includes(purpose)) return err(`${rowLbl}: invalid Purpose.`);
 
-    let projectId = null, clientName = null;
+    let projectId = null, clientName = null, purposeOtherReason = null;
     const rawPid = e.project_id;
     const rawCli = (typeof e.client_name === 'string') ? e.client_name.trim() : '';
-    if (purpose === 'sales_visit') {
-      if (rawPid != null && rawPid !== '') {
-        const n = parseInt(rawPid, 10);
-        if (!Number.isFinite(n) || n <= 0) return err(`${rowLbl}: invalid project selection.`);
-        projectId = n;
-      } else if (rawCli) {
-        clientName = rawCli.slice(0, 200);
-      } else {
-        return err(`${rowLbl}: pick a project or enter the client / prospect name.`);
-      }
-    } else if (purpose === 'metfraa_office' || purpose === 'metfraa_factory') {
-      // Internal visit — project is optional. If they did pick one, keep it.
-      if (rawPid != null && rawPid !== '') {
-        const n = parseInt(rawPid, 10);
-        if (!Number.isFinite(n) || n <= 0) return err(`${rowLbl}: invalid project selection.`);
-        projectId = n;
-      }
-    } else {
+    const rawOther = (typeof e.purpose_other_reason === 'string') ? e.purpose_other_reason.trim() : '';
+    if (purpose === 'project_visit') {
       if (rawPid == null || rawPid === '') return err(`${rowLbl}: select a Project.`);
       const n = parseInt(rawPid, 10);
       if (!Number.isFinite(n) || n <= 0) return err(`${rowLbl}: invalid project selection.`);
       projectId = n;
+    } else if (purpose === 'site_visit') {
+      if (!rawCli) return err(`${rowLbl}: please enter the site name or location.`);
+      clientName = rawCli.slice(0, 200);
+    } else if (purpose === 'purchase_visit') {
+      if (!rawCli) return err(`${rowLbl}: please enter the vendor / supplier name.`);
+      clientName = rawCli.slice(0, 200);
+    } else if (purpose === 'sales_visit') {
+      if (!rawCli) return err(`${rowLbl}: please enter the client / prospect name.`);
+      clientName = rawCli.slice(0, 200);
+    } else if (purpose === 'metfraa_office' || purpose === 'metfraa_factory') {
+      // Internal visit — nothing extra required (project + client ignored)
+    } else if (purpose === 'other') {
+      if (!rawOther) return err(`${rowLbl}: please describe the reason for the "Other" purpose.`);
+      purposeOtherReason = rawOther.slice(0, 500);
     }
 
     // Bill requirement: anything other than Bus requires a bill (the
@@ -419,6 +417,7 @@ function validateMetDtr(input, employee) {
       purpose_category: purpose,
       project_id: projectId,
       client_name: clientName,
+      purpose_other_reason: purposeOtherReason,
       bill_pending_id: billPendingId,   // server uses this to link the attachment
     });
     total += fare;
@@ -455,10 +454,11 @@ const FORM_META = {
 };
 
 // Valid purpose categories — fixed list as agreed with the customer
-const PURPOSE_CATEGORIES = ['project_visit', 'site_visit', 'sales_visit', 'metfraa_office', 'metfraa_factory', 'purchase_visit'];
+const PURPOSE_CATEGORIES = ['project_visit', 'site_visit', 'sales_visit', 'metfraa_office', 'metfraa_factory', 'purchase_visit', 'other'];
 // Purposes that DON'T require a project link (the destination is implicit
-// — your own office, or a sales prospect with a free-text client name).
-const PURPOSE_NO_PROJECT_REQUIRED = new Set(['sales_visit', 'metfraa_office', 'metfraa_factory']);
+// — your own office, a sales prospect with a free-text client name, or
+// an unstructured 'other' with a reason).
+const PURPOSE_NO_PROJECT_REQUIRED = new Set(['sales_visit', 'metfraa_office', 'metfraa_factory', 'other']);
 
 function validate(formType, input, employee) {
   const v = VALIDATORS[formType];
@@ -495,40 +495,47 @@ function validate(formType, input, employee) {
   if (!purpose)                                return err('Purpose is required. Please pick Project Visit, Site Visit, or Sales Visit.');
   if (!PURPOSE_CATEGORIES.includes(purpose))   return err('Invalid purpose selection.');
 
-  // project_id: required for project_visit / site_visit; optional for
-  // sales_visit (use client_name for a prospect) AND for visits to
-  // Metfraa's own office/factory (the destination is implicit).
+  // Purpose categorisation — each option captures a different piece of
+  // context and uses a different column:
+  //   project_visit    → project_id required (dropdown)
+  //   site_visit       → client_name required (free-text: site name/location)
+  //   purchase_visit   → client_name required (free-text: vendor name)
+  //   sales_visit      → client_name required (free-text: prospect/client)
+  //   metfraa_office   → nothing extra
+  //   metfraa_factory  → nothing extra
+  //   other            → purpose_other_reason required (free-text)
   let projectId = null;
   let clientName = null;
+  let purposeOtherReason = null;
   const rawProjectId = input && input.project_id;
   const rawClient    = input && typeof input.client_name === 'string' ? input.client_name.trim() : '';
+  const rawOtherReason = input && typeof input.purpose_other_reason === 'string' ? input.purpose_other_reason.trim() : '';
 
-  if (purpose === 'sales_visit') {
-    // Need EITHER a project OR a client name
-    if (rawProjectId != null && rawProjectId !== '') {
-      const n = parseInt(rawProjectId, 10);
-      if (!Number.isFinite(n) || n <= 0) return err('Invalid project selection.');
-      projectId = n;
-    } else if (rawClient) {
-      clientName = rawClient.slice(0, 200);
-    } else {
-      return err('For a Sales Visit, pick a project or enter the client / prospect name.');
-    }
-  } else if (purpose === 'metfraa_office' || purpose === 'metfraa_factory') {
-    // Internal visit — project is optional. If they did pick one, keep it.
-    if (rawProjectId != null && rawProjectId !== '') {
-      const n = parseInt(rawProjectId, 10);
-      if (!Number.isFinite(n) || n <= 0) return err('Invalid project selection.');
-      projectId = n;
-    }
-  } else {
-    // Project or Site Visit — project is REQUIRED
+  if (purpose === 'project_visit') {
+    // Only purpose that uses the project dropdown.
     if (rawProjectId == null || rawProjectId === '') {
       return err('Please select a Project for this visit.');
     }
     const n = parseInt(rawProjectId, 10);
     if (!Number.isFinite(n) || n <= 0) return err('Invalid project selection.');
     projectId = n;
+  } else if (purpose === 'site_visit') {
+    if (!rawClient) return err('Please enter the site name or location.');
+    clientName = rawClient.slice(0, 200);
+  } else if (purpose === 'purchase_visit') {
+    if (!rawClient) return err('Please enter the vendor / supplier name.');
+    clientName = rawClient.slice(0, 200);
+  } else if (purpose === 'sales_visit') {
+    if (!rawClient) return err('Please enter the client / prospect name.');
+    clientName = rawClient.slice(0, 200);
+  } else if (purpose === 'metfraa_office' || purpose === 'metfraa_factory') {
+    // Internal visit — destination is implicit. Nothing extra required.
+    // (We intentionally IGNORE any project_id or client_name the client
+    // might send — the new UI shouldn't submit them either.)
+  } else if (purpose === 'other') {
+    // Free-text reason required.
+    if (!rawOtherReason) return err('Please describe the reason for this "Other" purpose.');
+    purposeOtherReason = rawOtherReason.slice(0, 500);
   }
 
   // Hand off to the form-specific validator with a CLEAN payload
@@ -537,6 +544,7 @@ function validate(formType, input, employee) {
   delete cleanInput.purpose_category;
   delete cleanInput.project_id;
   delete cleanInput.client_name;
+  delete cleanInput.purpose_other_reason;
 
   const result = v(cleanInput, employee);
   if (!result.ok) return result;
@@ -547,6 +555,7 @@ function validate(formType, input, employee) {
     purpose_category: purpose,
     project_id: projectId,
     client_name: clientName,
+    purpose_other_reason: purposeOtherReason,
   };
   return result;
 }

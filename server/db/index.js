@@ -174,7 +174,8 @@ db.exec(`
   add('changes_required',        `changes_required TEXT`);
   add('returned_at',             `returned_at TEXT`);
   // Categorization columns for the dashboard (purpose + project link).
-  add('purpose_category',        `purpose_category TEXT`);   // 'project_visit' | 'site_visit' | 'sales_visit' | 'metfraa_office' | 'metfraa_factory' | 'purchase_visit'
+  add('purpose_category',        `purpose_category TEXT`);   // 'project_visit' | 'site_visit' | 'sales_visit' | 'metfraa_office' | 'metfraa_factory' | 'purchase_visit' | 'other'
+  add('purpose_other_reason',    `purpose_other_reason TEXT`); // free-text when purpose='other'
   add('project_id',              `project_id INTEGER`);      // FK to projects.id, nullable for Sales Visits with no project
   add('client_name',             `client_name TEXT`);        // free-text alternative when no project (sales prospect)
   // Normalise any legacy 'submitted' status to 'pending'
@@ -317,9 +318,9 @@ const stmts = {
 
   createSubmission: db.prepare(`
     INSERT INTO submissions (reference, employee_id, company, form_type, period, payload_json, total_amount, pdf_path,
-                             purpose_category, project_id, client_name)
+                             purpose_category, purpose_other_reason, project_id, client_name)
     VALUES (@reference, @employee_id, @company, @form_type, @period, @payload_json, @total_amount, @pdf_path,
-            @purpose_category, @project_id, @client_name)
+            @purpose_category, @purpose_other_reason, @project_id, @client_name)
   `),
   updateSubmissionPdf: db.prepare(`UPDATE submissions SET pdf_path = ? WHERE id = ?`),
   markEmailSent: db.prepare(`UPDATE submissions SET email_sent_at = datetime('now'), email_error = NULL WHERE id = ?`),
@@ -347,7 +348,8 @@ const stmts = {
   resubmitFromDraft: db.prepare(`
     UPDATE submissions SET status='pending',
       payload_json=@payload_json, total_amount=@total_amount,
-      purpose_category=@purpose_category, project_id=@project_id, client_name=@client_name,
+      purpose_category=@purpose_category, purpose_other_reason=@purpose_other_reason,
+      project_id=@project_id, client_name=@client_name,
       submitted_at=datetime('now'),
       changes_required=NULL, returned_at=NULL
     WHERE id=@id

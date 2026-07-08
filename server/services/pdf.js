@@ -194,11 +194,32 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
           metfraa_office:   'Visit to Metfraa - Office',
           metfraa_factory:  'Visit to Metfraa - Factory',
           purchase_visit:   'Purchase Visit',
+          other:            'Other',
         };
         const purposeText = PURPOSE_NAMES[submission.purpose_category] || '—';
-        const projectText = submission.project
-          ? (submission.project.name + (submission.project.code && submission.project.code !== submission.project.name ? ` (${submission.project.code})` : ''))
-          : (submission.client_name ? `${submission.client_name} (Prospect)` : '—');
+
+        // Second column of the strip adapts to the purpose. The underlying
+        // columns are still project_id / client_name / purpose_other_reason,
+        // but the LABEL matches the intent — reviewers see "Site: AMNS
+        // Hazira Plant" not "Project: AMNS Hazira Plant (Prospect)".
+        let secondLabel = 'PROJECT';
+        let secondValue = '—';
+        const pc = submission.purpose_category;
+        if (pc === 'project_visit' && submission.project) {
+          secondValue = submission.project.name + (submission.project.code && submission.project.code !== submission.project.name ? ` (${submission.project.code})` : '');
+        } else if (pc === 'site_visit') {
+          secondLabel = 'SITE'; secondValue = submission.client_name || '—';
+        } else if (pc === 'purchase_visit') {
+          secondLabel = 'VENDOR'; secondValue = submission.client_name || '—';
+        } else if (pc === 'sales_visit') {
+          secondLabel = 'CLIENT'; secondValue = submission.client_name || '—';
+        } else if (pc === 'metfraa_office' || pc === 'metfraa_factory') {
+          secondLabel = 'DESTINATION';
+          secondValue = pc === 'metfraa_office' ? 'Metfraa Office' : 'Metfraa Factory';
+        } else if (pc === 'other') {
+          secondLabel = 'REASON';
+          secondValue = submission.purpose_other_reason || '—';
+        }
 
         const stripY = doc.y;
         const stripH = 36;
@@ -210,10 +231,21 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
         doc.fontSize(11).fillColor(INK).font('Helvetica-Bold')
            .text(purposeText, 50 + 10, stripY + 17, { width: halfW - 20, lineBreak: false, ellipsis: true });
         doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
-           .text('PROJECT', 50 + halfW + 10, stripY + 6, { characterSpacing: 1.3 });
+           .text(secondLabel, 50 + halfW + 10, stripY + 6, { characterSpacing: 1.3 });
         doc.fontSize(11).fillColor(INK).font('Helvetica-Bold')
-           .text(projectText, 50 + halfW + 10, stripY + 17, { width: halfW - 20, lineBreak: false, ellipsis: true });
+           .text(secondValue, 50 + halfW + 10, stripY + 17, { width: halfW - 20, lineBreak: false, ellipsis: true });
         doc.y = stripY + stripH + 16;
+
+        // If the value is 'Other' with a long reason, spill it below the
+        // strip in full since the strip is single-line ellipsised.
+        if (pc === 'other' && submission.purpose_other_reason && submission.purpose_other_reason.length > 60) {
+          doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
+             .text('REASON (FULL)', 50, doc.y, { characterSpacing: 1.3 });
+          doc.moveDown(0.2);
+          doc.fontSize(10).fillColor(INK).font('Helvetica')
+             .text(submission.purpose_other_reason, 50, doc.y, { width: doc.page.width - 100 });
+          doc.moveDown(0.6);
+        }
       }
 
       // -- Form-specific body ----------------------------------------
@@ -538,19 +570,34 @@ function renderMetMisc(doc, p) {
 //   each entry that had a bill, we show "Bill ✓" in the table.
 function renderMetDtr(doc, p, sub) {
   const MODE_LABEL = { bus: 'Bus', bike_taxi: 'Bike Taxi', auto: 'Auto', share_auto: 'Share Auto' };
-  const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales', metfraa_office: 'M. Office', metfraa_factory: 'M. Factory', purchase_visit: 'Purchase' };
+  const PURPOSE_LABEL = { project_visit: 'Project', site_visit: 'Site', sales_visit: 'Sales', metfraa_office: 'M. Office', metfraa_factory: 'M. Factory', purchase_visit: 'Purchase', other: 'Other' };
   const lookup = (sub && sub.project_lookup) || {};
   const entries = Array.isArray(p.entries) ? p.entries : [];
 
   sectionHeading(doc, `Daily Travel · ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}`);
 
   const rows = entries.map(e => {
-    let project = '—';
-    if (e.project_id != null && lookup[e.project_id]) {
+    // Compute the per-entry context — same adaptive rule as the popup:
+    // Project name for project_visit, Site / Vendor / Client for the
+    // relevant purposes, own-premises label for metfraa_office/factory,
+    // and the free-text reason for 'other'.
+    let context = '—';
+    const pc = e.purpose_category;
+    if (pc === 'project_visit' && e.project_id != null && lookup[e.project_id]) {
       const pr = lookup[e.project_id];
-      project = pr.code && pr.code !== pr.name ? `${pr.name} (${pr.code})` : pr.name;
-    } else if (e.client_name) {
-      project = `${e.client_name} (Prospect)`;
+      context = pr.code && pr.code !== pr.name ? `${pr.name} (${pr.code})` : pr.name;
+    } else if (pc === 'site_visit' && e.client_name) {
+      context = `Site: ${e.client_name}`;
+    } else if (pc === 'purchase_visit' && e.client_name) {
+      context = `Vendor: ${e.client_name}`;
+    } else if (pc === 'sales_visit' && e.client_name) {
+      context = `Client: ${e.client_name}`;
+    } else if (pc === 'metfraa_office') {
+      context = 'Metfraa Office';
+    } else if (pc === 'metfraa_factory') {
+      context = 'Metfraa Factory';
+    } else if (pc === 'other' && e.purpose_other_reason) {
+      context = e.purpose_other_reason;
     }
     const bill = e.mode === 'bus' ? '—' : 'Yes';
     return [
@@ -559,16 +606,16 @@ function renderMetDtr(doc, p, sub) {
       e.from || '—',
       e.to || '—',
       PURPOSE_LABEL[e.purpose_category] || '—',
-      project,
+      context,
       bill,
       `₹ ${fmt(parseFloat(e.fare) || 0)}`,
     ];
   });
 
-  // Widths: Date / Mode / From / To / Purpose / Project / Bill / Fare
+  // Widths: Date / Mode / From / To / Purpose / Context / Bill / Fare
   // The table helper normalises these to fit page width.
   table(doc,
-    ['Date', 'Mode', 'From', 'To', 'Purpose', 'Project', 'Bill', 'Fare'],
+    ['Date', 'Mode', 'From', 'To', 'Purpose', 'Context', 'Bill', 'Fare'],
     rows,
     [54, 56, 80, 80, 50, 90, 30, 55],
     { numericCols: [7] }
@@ -584,6 +631,20 @@ function renderMetDtr(doc, p, sub) {
     doc.fontSize(9).fillColor(INK).font('Helvetica');
     for (const e of withRemarks) {
       doc.text(`${formatDate(e.date)} — ${e.remarks}`, { width: doc.page.width - 100 });
+    }
+  }
+
+  // If any entries used purpose='other', list their reasons — the compact
+  // main table only shows "Other" in the purpose column, so the reader
+  // needs this context to understand why the trip qualified.
+  const withOther = entries.filter(e => e.purpose_category === 'other' && e.purpose_other_reason);
+  if (withOther.length) {
+    doc.moveDown(0.6);
+    doc.fontSize(9).fillColor(MUTED).font('Helvetica-Bold').text('OTHER — REASONS', { characterSpacing: 1.3 });
+    doc.moveDown(0.3);
+    doc.fontSize(9).fillColor(INK).font('Helvetica');
+    for (const e of withOther) {
+      doc.text(`${formatDate(e.date)} — ${e.purpose_other_reason}`, { width: doc.page.width - 100 });
     }
   }
 }

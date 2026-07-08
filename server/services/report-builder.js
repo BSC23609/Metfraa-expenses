@@ -41,6 +41,7 @@ async function buildReportPdf(sub, { draft = true } = {}) {
       reference: sub.reference, form_type: sub.form_type, company: sub.company,
       period: sub.period, total_amount: sub.total_amount, submitted_at: sub.submitted_at,
       purpose_category: sub.purpose_category || null,
+      purpose_other_reason: sub.purpose_other_reason || null,
       project: project ? { id: project.id, code: project.code, name: project.name } : null,
       client_name: sub.client_name || null,
       project_lookup: projectLookup,
