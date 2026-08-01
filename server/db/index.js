@@ -734,19 +734,19 @@ Object.assign(stmts, {
     WHERE employee_id = @employee_id AND period = @period
   `),
   // draft → pending_hr (after HR notification email queued)
-  markConsolidatedPendingHr: db.prepare(`
-    UPDATE consolidated_reports
-    SET status = 'pending_hr',
-        hr_emailed_at = COALESCE(hr_emailed_at, datetime('now'))
-    WHERE id = ? AND status IN ('draft','pending_hr')
-  `),
-  // pending_hr → pending_mgmt
-  markConsolidatedHrApproved: db.prepare(`
+  // draft → pending_mgmt — HR clicks "Send for final approval". The
+  // report goes STRAIGHT to Management (no separate HR review step at
+  // the consolidated level; HR effectively pre-approved by clicking Send).
+  //   hr_approved_by/at   = who sent + when
+  //   mgmt_emailed_at     = when Arasu's email went out
+  //   Guard on status='draft' so we don't accidentally re-fire from a
+  //   later state (idempotency at the SQL layer).
+  markConsolidatedSentForApproval: db.prepare(`
     UPDATE consolidated_reports
     SET status = 'pending_mgmt',
         hr_approved_by = ?, hr_approved_at = datetime('now'),
         mgmt_emailed_at = COALESCE(mgmt_emailed_at, datetime('now'))
-    WHERE id = ? AND status = 'pending_hr'
+    WHERE id = ? AND status = 'draft'
   `),
   // pending_mgmt → approved
   markConsolidatedMgmtApproved: db.prepare(`
@@ -756,13 +756,12 @@ Object.assign(stmts, {
         accounts_sent_at = COALESCE(accounts_sent_at, datetime('now'))
     WHERE id = ? AND status = 'pending_mgmt'
   `),
-  // pending_hr / pending_mgmt → rejected
+  // pending_mgmt → rejected
   markConsolidatedRejected: db.prepare(`
     UPDATE consolidated_reports
     SET status = 'rejected',
-        hr_rejected_reason = CASE WHEN @level = 'hr' THEN @reason ELSE hr_rejected_reason END,
-        mgmt_rejected_reason = CASE WHEN @level = 'mgmt' THEN @reason ELSE mgmt_rejected_reason END
-    WHERE id = @id AND status IN ('pending_hr','pending_mgmt')
+        mgmt_rejected_reason = @reason
+    WHERE id = @id AND status = 'pending_mgmt'
   `),
 
   // Add columns used by Turn 2's email bookkeeping (safe on top of the
@@ -785,6 +784,42 @@ Object.assign(stmts, {
   // (deserialised at the callsite; SQLite doesn't like binding a JSON
   // array as a parameter, so callers loop and use this simpler getter).
   getSubmissionById: db.prepare(`SELECT * FROM submissions WHERE id = ?`),
+
+  // ---- Monthly summary (per-employee rollup for a period) ---------
+  //  For every employee who has ≥1 submission in the given period,
+  //  count how many are in each status. Used to decide whether HR can
+  //  click "Send for final approval" — the button is enabled only when
+  //  there are no pending/draft rows left.
+  //
+  //  Note: 'submitted' is our shorthand — sum of pending / approved /
+  //  settled / draft / rejected. Only counts submissions that have a
+  //  real period value; anything with NULL period is invisible here.
+  listMonthlySummaryForPeriod: db.prepare(`
+    SELECT
+      e.id                                                              AS employee_id,
+      e.name                                                            AS employee_name,
+      e.email                                                           AS employee_email,
+      e.employee_code                                                   AS employee_code,
+      COUNT(*)                                                          AS total,
+      SUM(CASE WHEN s.status = 'pending'          THEN 1 ELSE 0 END)    AS pending_count,
+      SUM(CASE WHEN s.status = 'approved'         THEN 1 ELSE 0 END)    AS approved_count,
+      SUM(CASE WHEN s.status = 'settled'          THEN 1 ELSE 0 END)    AS settled_count,
+      SUM(CASE WHEN s.status = 'draft'            THEN 1 ELSE 0 END)    AS draft_count,
+      SUM(CASE WHEN s.status = 'rejected'         THEN 1 ELSE 0 END)    AS rejected_count,
+      SUM(CASE WHEN s.status = 'advance_approved' THEN 1 ELSE 0 END)    AS advance_approved_count,
+      SUM(CASE WHEN s.status IN ('approved','settled')
+             THEN COALESCE(
+                   CASE WHEN s.status = 'settled'
+                        THEN json_extract(s.actuals_json, '$.actual_amount')
+                        ELSE NULL END,
+                   s.total_amount, 0)
+             ELSE 0 END)                                                AS approved_total
+    FROM submissions s
+    JOIN employees e ON e.id = s.employee_id
+    WHERE s.period = ?
+    GROUP BY e.id, e.name, e.email, e.employee_code
+    ORDER BY e.name ASC
+  `),
 });
 
 module.exports = {

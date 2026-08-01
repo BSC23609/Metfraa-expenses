@@ -454,17 +454,14 @@
     <!-- TAB: Consolidated Reports -->
     <div class="admin-tabpane" id="tab-consolidated">
       <div class="admin-toolbar">
-        <label for="conMonth" style="font-size:11px;font-family:'JetBrains Mono',monospace;letter-spacing:0.05em;color:var(--bsg-muted);text-transform:uppercase;font-weight:600;">Filter month</label>
+        <label for="conMonth" style="font-size:11px;font-family:'JetBrains Mono',monospace;letter-spacing:0.05em;color:var(--bsg-muted);text-transform:uppercase;font-weight:600;">Month</label>
         <input type="month" id="conMonth" class="admin-search" style="flex:0 0 180px;" />
         <span class="admin-count" id="conCount"></span>
-        <div style="margin-left:auto;display:flex;gap:8px;">
-          <button class="btn btn-ghost" id="conRefreshBtn">Refresh</button>
-          <button class="btn btn-submit" id="conGenerateBtn">Generate for month…</button>
-        </div>
+        <button class="btn btn-ghost" id="conRefreshBtn" style="margin-left:auto;">Refresh</button>
       </div>
       <div class="card" style="padding:16px 20px;margin-bottom:14px;background:#f6f8fa;">
         <div style="font-size:12px;color:var(--bsg-muted);line-height:1.6;">
-          <strong>Consolidated reports</strong> bundle every approved &amp; settled claim for a month into one navigable PDF per employee — click the "&gt;" on any TOC row to jump to that submission, click the "HOME" pill on any page to jump back. <strong>Automatic generation</strong> runs at 00:15 IST on the 1st of each month for the previous month. Use "Generate for month…" below to run it early or catch-up. Turn 2 will add HR/Management approval flow + email dispatch.
+          <strong>Monthly wrap-up.</strong> Pick a month. For every employee who submitted anything that month, this shows how many of their submissions are approved vs. still pending. Once <em>all</em> of an employee's submissions for the month are approved (or settled), the <strong>Send for final approval</strong> button unlocks. Clicking it generates a single consolidated PDF (with TOC + intra-file links + your HR sign-off on the cover) and emails it to arasu@metfraa.com (CC admin@metfraa.com). After Arasu approves in the portal, the finalized PDF goes to accounts@metfraa.com (CC admin@).
         </div>
       </div>
       <div class="card" style="padding:0;overflow:hidden;">
@@ -472,12 +469,9 @@
           <table class="admin-table" id="conTable">
             <thead>
               <tr>
-                <th>Period</th>
                 <th>Employee</th>
-                <th style="text-align:right;">Total</th>
-                <th>Claims</th>
-                <th>Pages</th>
-                <th>Generated</th>
+                <th>Submissions</th>
+                <th style="text-align:right;">Approved total</th>
                 <th>Status</th>
                 <th style="text-align:right;">Actions</th>
               </tr>

@@ -4078,210 +4078,223 @@
     }
   }
 
-  // ---- Consolidated Reports (admin) ---------------------------------
-  //   Lists auto-generated monthly reports per employee, with links to
-  //   view the PDF and a manual "generate" button for on-demand runs.
+  // ---- Monthly Wrap-up (admin) --------------------------------------
+  //   Per-employee rollup for a chosen month, showing submission
+  //   counts by status. HR clicks "Send for final approval" once
+  //   everyone's submissions are approved — that generates the
+  //   consolidated PDF and emails Arasu. If a report has already been
+  //   sent, this row shows the report's approval status instead.
+  //
+  //   The review flow (Arasu opens the report and approves/rejects) is
+  //   still here — it's just triggered by clicking "Mgmt Review" on
+  //   rows whose consolidated_report is in status='pending_mgmt'.
+
   async function loadConsolidated() {
     const tbody = $('#conTableBody');
     if (!tbody) return;
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--bsg-muted);padding:24px;">Loading…</td></tr>';
+    let period = ($('#conMonth').value || '').trim();
+    if (!period) {
+      // Default to previous month
+      const now = new Date();
+      const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+      period = prev.getUTCFullYear() + '-' + String(prev.getUTCMonth() + 1).padStart(2, '0');
+      $('#conMonth').value = period;
+    }
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--bsg-muted);padding:24px;">Loading…</td></tr>';
     try {
-      const period = ($('#conMonth').value || '').trim();
-      const url = period ? `/api/admin/consolidated?period=${encodeURIComponent(period)}` : '/api/admin/consolidated';
-      const data = await api(url);
-      state.consolidatedReports = data.reports || [];
+      const data = await api(`/api/admin/consolidated/monthly-summary?period=${encodeURIComponent(period)}`);
+      state.monthlyWrapup = { period: data.period, rows: data.rows || [] };
       drawConsolidatedTable();
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--bsg-danger);padding:24px;">${err.message || 'Failed to load'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--bsg-danger);padding:24px;">${err.message || 'Failed to load'}</td></tr>`;
     }
   }
 
   function drawConsolidatedTable() {
     const tbody = $('#conTableBody');
     if (!tbody) return;
-    const rows = state.consolidatedReports || [];
+    const rows = (state.monthlyWrapup && state.monthlyWrapup.rows) || [];
+    const period = (state.monthlyWrapup && state.monthlyWrapup.period) || '';
     tbody.innerHTML = '';
+
     if (!rows.length) {
-      const filtered = ($('#conMonth').value || '').trim();
       tbody.appendChild(el('tr', {}, el('td', {
-        colspan: 8, style: 'text-align:center;color:var(--bsg-muted);padding:32px;'
-      }, filtered
-          ? `No consolidated reports for ${filtered} yet. Use "Generate for month…" to create them.`
-          : 'No consolidated reports generated yet.')));
+        colspan: 5, style: 'text-align:center;color:var(--bsg-muted);padding:32px;'
+      }, `No submissions found for ${period}.`)));
       $('#conCount').textContent = '';
       return;
     }
-    // Group visually by period — SQL sorts by period DESC already, so we
-    // just add a subtle top-border on the first row of each new period.
-    let lastPeriod = null;
+
+    let readyCount = 0;
     for (const r of rows) {
-      const isFirstOfPeriod = r.period !== lastPeriod;
-      lastPeriod = r.period;
-      const actions = el('div', { class: 'admin-actions' });
-      // Every row: view PDF
-      actions.appendChild(el('a', { class: 'view', href: `/api/admin/consolidated/${r.id}/pdf`, target: '_blank' }, 'Open PDF'));
-      // Review button — surfaces the approve/reject inline panel
-      if (r.status === 'pending_hr' || r.status === 'pending_mgmt') {
-        actions.appendChild(el('button', {
-          class: 'approve',
-          style: 'background:#2563eb;border-color:#2563eb;',
-          onclick: () => openReview(r),
-        }, r.status === 'pending_hr' ? 'HR Review' : 'Mgmt Review'));
-      }
-      // Regenerate — hide once approved (would clobber signed PDF)
-      if (r.status !== 'approved') {
-        actions.appendChild(el('button', { class: 'approve', onclick: () => regenerateOne(r) }, 'Regenerate'));
-      }
-      // Resend email — for stuck / bounced notifications
-      if (['pending_hr', 'pending_mgmt', 'approved'].includes(r.status)) {
-        actions.appendChild(el('button', {
-          class: 'view', style: 'background:transparent;color:var(--bsg-muted);',
-          onclick: () => resendEmail(r),
-        }, 'Resend email'));
+      const cr = r.consolidated_report;
+      const pendingLike = (r.pending_count || 0) + (r.draft_count || 0)
+                       + (r.advance_approved_count || 0);
+      const rejectedInMonth = r.rejected_count || 0;
+      const approvedLike = (r.approved_count || 0) + (r.settled_count || 0);
+      const allClear = pendingLike === 0 && rejectedInMonth === 0 && approvedLike > 0;
+
+      // ---- Submissions column: status breakdown chips
+      const chips = el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;font-size:11px;' });
+      const chip = (n, label, cls) => n > 0 ? el('span', {
+        class: 'status-pill ' + cls,
+        style: 'padding:2px 8px;font-size:10px;',
+      }, `${n} ${label}`) : null;
+      const addIf = (child) => { if (child) chips.appendChild(child); };
+      addIf(chip(r.pending_count,          'pending',   'pending'));
+      addIf(chip(r.approved_count,         'approved',  'approved'));
+      addIf(chip(r.settled_count,          'settled',   'approved'));
+      addIf(chip(r.advance_approved_count, 'advance',   'pending'));
+      addIf(chip(r.draft_count,            'draft',     'draft'));
+      addIf(chip(r.rejected_count,         'rejected',  'rejected'));
+      const totalLine = el('div', { style: 'font-size:11px;color:var(--bsg-muted);margin-top:4px;' },
+        `${r.total} total`);
+
+      // ---- Status column: either report status (if sent) or "ready/blocked"
+      let statusCell;
+      if (cr) {
+        statusCell = el('span', { class: 'status-pill ' + statusPillClass(cr.status) },
+          cr.status === 'pending_mgmt' ? 'awaiting Arasu'
+          : cr.status === 'approved'   ? 'approved · sent to accounts'
+          : cr.status === 'rejected'   ? 'rejected · returned to employee'
+          : cr.status);
+      } else if (allClear) {
+        statusCell = el('span', { class: 'status-pill approved' }, 'ready to send');
+        readyCount++;
+      } else if (pendingLike > 0) {
+        const blockers = [];
+        if (r.pending_count > 0)          blockers.push(`${r.pending_count} pending`);
+        if (r.draft_count > 0)            blockers.push(`${r.draft_count} draft`);
+        if (r.advance_approved_count > 0) blockers.push(`${r.advance_approved_count} advance`);
+        statusCell = el('span', { class: 'status-pill pending' }, blockers.join(' · '));
+      } else if (rejectedInMonth > 0 && approvedLike === 0) {
+        statusCell = el('span', { class: 'status-pill rejected' }, 'all rejected');
+      } else if (rejectedInMonth > 0) {
+        statusCell = el('span', { class: 'status-pill rejected' }, `${rejectedInMonth} rejected — needs cleanup`);
+      } else {
+        statusCell = el('span', { class: 'status-pill draft' }, '—');
       }
 
-      tbody.appendChild(el('tr', { style: isFirstOfPeriod ? 'border-top:2px solid var(--bsg-line);' : '', id: `con-row-${r.id}` },
-        el('td', {}, isFirstOfPeriod
-          ? el('strong', {}, r.period)
-          : el('span', { style: 'color:var(--bsg-muted);' }, r.period)),
+      // ---- Actions column
+      const actions = el('div', { class: 'admin-actions', style: 'justify-content:flex-end;' });
+      if (cr) {
+        actions.appendChild(el('a', { class: 'view', href: `/api/admin/consolidated/${cr.id}/pdf`, target: '_blank' }, 'Open PDF'));
+        if (cr.status === 'pending_mgmt') {
+          actions.appendChild(el('button', {
+            class: 'approve',
+            style: 'background:#2563eb;border-color:#2563eb;',
+            onclick: () => openReview(cr),
+          }, 'Mgmt Review'));
+          actions.appendChild(el('button', {
+            class: 'view', style: 'background:transparent;color:var(--bsg-muted);',
+            onclick: () => resendEmail(cr),
+          }, 'Resend'));
+        } else if (cr.status === 'approved') {
+          actions.appendChild(el('button', {
+            class: 'view', style: 'background:transparent;color:var(--bsg-muted);',
+            onclick: () => resendEmail(cr),
+          }, 'Resend to Accounts'));
+        } else if (cr.status === 'rejected') {
+          // After rejection, HR needs the employee to fix + get re-approved,
+          // then click Send again. Show status but no action here — the
+          // re-send button appears once the row's status clears back to ready.
+          if (allClear) {
+            actions.appendChild(el('button', {
+              class: 'approve', style: 'background:#059669;border-color:#059669;',
+              onclick: () => sendForApproval(r, period),
+            }, 'Re-send for approval'));
+          }
+        }
+      } else if (allClear) {
+        actions.appendChild(el('button', {
+          class: 'approve', style: 'background:#059669;border-color:#059669;',
+          onclick: () => sendForApproval(r, period),
+        }, 'Send for final approval'));
+      } else {
+        actions.appendChild(el('span', { style: 'font-size:11px;color:var(--bsg-muted);' },
+          'Approve remaining submissions first'));
+      }
+
+      tbody.appendChild(el('tr', {},
         el('td', {},
           el('div', { style: 'font-weight:600;' }, r.employee_name),
           el('div', { style: 'font-family:monospace;font-size:11px;color:var(--bsg-muted);' }, r.employee_email),
         ),
-        el('td', { class: 'num', style: 'text-align:right;font-weight:600;' }, 'INR ' + fmt(r.total_amount)),
-        el('td', {}, String(r.submission_count)),
-        el('td', {}, r.pdf_page_count ? String(r.pdf_page_count) + ' pp' : '—'),
-        el('td', { style: 'font-size:12px;color:var(--bsg-muted);' },
-          formatGeneratedLine(r.generated_at, r.generated_by)),
-        el('td', {}, el('span', { class: 'status-pill ' + statusPillClass(r.status) }, r.status)),
+        el('td', {}, chips, totalLine),
+        el('td', { class: 'num', style: 'text-align:right;font-weight:600;' },
+          approvedLike > 0 ? 'INR ' + fmt(r.approved_total || 0) : '—'),
+        el('td', {}, statusCell),
         el('td', { style: 'text-align:right;' }, actions),
       ));
     }
-    const monthFilter = ($('#conMonth').value || '').trim();
-    $('#conCount').textContent = monthFilter
-      ? `${rows.length} report${rows.length === 1 ? '' : 's'} for ${monthFilter}`
-      : `${rows.length} report${rows.length === 1 ? '' : 's'} total`;
+
+    $('#conCount').textContent =
+      `${rows.length} employee${rows.length === 1 ? '' : 's'} · ${readyCount} ready to send`;
   }
 
   function statusPillClass(status) {
-    // Reuse existing pill classes where they match; fall back to a neutral color
     switch (status) {
       case 'approved':     return 'approved';
       case 'draft':        return 'draft';
       case 'rejected':     return 'rejected';
-      case 'pending_hr':   return 'pending';
       case 'pending_mgmt': return 'pending';
       default:             return 'pending';
     }
   }
 
-  function formatGeneratedLine(iso, by) {
-    if (!iso) return '—';
-    try {
-      const parseable = iso.length === 19 && iso[10] === ' ' ? iso.replace(' ', 'T') + 'Z' : iso;
-      const d = new Date(parseable);
-      if (isNaN(d)) return iso;
-      const dateStr = d.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-      const byLabel = by === 'cron' ? 'auto' : (by ? by.split('@')[0] : '');
-      return `${dateStr}${byLabel ? ' · ' + byLabel : ''}`;
-    } catch (_) { return iso; }
-  }
-
-  async function regenerateOne(r) {
+  // Send an employee's consolidated report for final approval.
+  async function sendForApproval(row, period) {
     const ok = await confirmModal({
-      title: 'Regenerate consolidated report?',
-      body: `Rebuild the PDF for ${r.employee_name} · ${r.period}? This will pick up any newly-approved submissions and reset any Turn 2 approval state on this report.`,
-      confirmText: 'Regenerate',
+      title: 'Send for final approval?',
+      body: `Generate and email the consolidated report for ${row.employee_name} (${period}) to arasu@metfraa.com (CC admin@metfraa.com)? Your name will be recorded as the HR verifier on the PDF cover.`,
+      confirmText: 'Send',
     });
     if (!ok) return;
-    showLoading('Regenerating…');
+    showLoading('Generating and sending…');
     try {
-      const res = await api('/api/admin/consolidated/generate', {
+      const res = await api('/api/admin/consolidated/send-for-approval', {
         method: 'POST',
-        body: JSON.stringify({ period: r.period, employee_id: r.employee_id }),
+        body: JSON.stringify({ employee_id: row.employee_id, period }),
       });
-      if (res.skipped) toast('No approved submissions for this employee/month.', 'info');
-      else toast('Report regenerated', 'success');
+      if (res.email_ok === false) {
+        toast('Report generated and sent to Arasu, but the email couldn\'t be sent. Use "Resend" on the row.', 'success');
+      } else {
+        toast('Sent to Arasu for final approval', 'success');
+      }
       await loadConsolidated();
     } catch (err) {
-      toast(err.message || 'Regeneration failed', 'error');
+      toast(err.message || 'Send failed', 'error');
     } finally {
       hideLoading();
     }
   }
 
-  async function generateForMonth() {
-    // Prompt HR for the target month
-    const period = window.prompt('Generate consolidated reports for which month? (YYYY-MM)', $('#conMonth').value || '');
-    if (!period) return;
-    if (!/^\d{4}-\d{2}$/.test(period)) {
-      toast('Enter a month as YYYY-MM (e.g. 2026-07).', 'error');
-      return;
-    }
-    const ok = await confirmModal({
-      title: 'Generate consolidated reports?',
-      body: `This will build (or rebuild) one PDF per employee who has approved submissions for ${period}. Any existing consolidated reports for that month will be replaced. Continue?`,
-      confirmText: 'Generate',
-    });
-    if (!ok) return;
-    showLoading('Generating reports for ' + period + '…');
-    try {
-      const res = await api('/api/admin/consolidated/generate', {
-        method: 'POST',
-        body: JSON.stringify({ period }),
-      });
-      toast(`${res.generated} report${res.generated === 1 ? '' : 's'} generated`, 'success');
-      // Focus the filter on the generated month so the user sees the results
-      $('#conMonth').value = period;
-      await loadConsolidated();
-    } catch (err) {
-      toast(err.message || 'Generation failed', 'error');
-    } finally {
-      hideLoading();
-    }
-  }
-
-  // ---- Review modal (Turn 2) ----------------------------------------
-  // Opens a wide modal with the embedded PDF viewer + approve/reject
-  // action bar tuned to the report's current status. HR reviewers see
-  // "Approve · Send to Management" and "Reject with note"; Management
-  // reviewers see "Approve · Send to Accounts" and the same reject.
+  // ---- Review modal (unchanged) -------------------------------------
+  // Opened from a row's "Mgmt Review" button, or from an email deep link.
+  // Arasu approves → email accounts@. Or reject with note → all
+  // submissions returned to the employee.
   function openReview(report) {
     const backdrop = ensureReviewBackdrop();
-    const isHrStage   = report.status === 'pending_hr';
-    const isMgmtStage = report.status === 'pending_mgmt';
-
-    $('#conReviewTitle').textContent =
-      `${report.employee_name} · ${report.period}` +
-      (isHrStage ? ' · HR Review' : isMgmtStage ? ' · Management Review' : '');
+    $('#conReviewTitle').textContent = `${report.employee_name} · ${report.period} · Management Review`;
     $('#conReviewSub').textContent =
       `${report.submission_count} claim${report.submission_count === 1 ? '' : 's'} · INR ${fmt(report.total_amount)}`;
+    $('#conReviewIframe').src = `/api/admin/consolidated/${report.id}/pdf`;
 
-    // Embed the PDF viewer. Browsers will use their built-in PDF renderer.
-    const iframe = $('#conReviewIframe');
-    iframe.src = `/api/admin/consolidated/${report.id}/pdf`;
-
-    // Action bar
     const bar = $('#conReviewActions');
     bar.innerHTML = '';
     bar.appendChild(el('button', { class: 'btn btn-ghost', onclick: closeReview }, 'Close'));
-
-    if (isHrStage || isMgmtStage) {
-      const rejectBtn = el('button', {
+    if (report.status === 'pending_mgmt') {
+      bar.appendChild(el('button', {
         class: 'btn',
         style: 'background:#dc2626;color:#fff;border-color:#dc2626;margin-left:auto;',
-        onclick: () => openRejectPrompt(report, isHrStage ? 'hr' : 'mgmt'),
-      }, 'Reject with note…');
-      bar.appendChild(rejectBtn);
-
-      const approveBtn = el('button', {
+        onclick: () => openRejectPrompt(report),
+      }, 'Reject with note…'));
+      bar.appendChild(el('button', {
         class: 'btn btn-submit',
         style: 'margin-left:8px;',
-        onclick: () => approveReport(report, isHrStage ? 'hr' : 'mgmt'),
-      }, isHrStage ? 'Approve · Send to Management' : 'Approve · Send to Accounts');
-      bar.appendChild(approveBtn);
+        onclick: () => approveReport(report),
+      }, 'Approve · Send to Accounts'));
     }
-
     state.reviewingReport = report;
     backdrop.classList.add('show');
   }
@@ -4289,7 +4302,6 @@
   function ensureReviewBackdrop() {
     let backdrop = $('#conReviewBackdrop');
     if (backdrop) return backdrop;
-    // Build on the fly — keeps the HTML file lean
     backdrop = document.createElement('div');
     backdrop.id = 'conReviewBackdrop';
     backdrop.className = 'modal-backdrop';
@@ -4306,9 +4318,7 @@
       </div>
     `;
     document.body.appendChild(backdrop);
-    backdrop.addEventListener('click', (e) => {
-      if (e.target === backdrop) closeReview();
-    });
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeReview(); });
     return backdrop;
   }
 
@@ -4316,27 +4326,24 @@
     const b = $('#conReviewBackdrop');
     if (b) b.classList.remove('show');
     const iframe = $('#conReviewIframe');
-    if (iframe) iframe.src = 'about:blank';   // stop streaming
+    if (iframe) iframe.src = 'about:blank';
     state.reviewingReport = null;
   }
 
-  async function approveReport(report, level) {
+  async function approveReport(report) {
     const ok = await confirmModal({
-      title: level === 'hr' ? 'Approve and send to Management?' : 'Approve and send to Accounts?',
-      body: level === 'hr'
-        ? `You'll be recorded as the HR verifier on this report, and it'll be forwarded to arasu@metfraa.com for final approval.`
-        : `You'll be recorded as the Management approver, and the finalized PDF will be emailed to accounts@metfraa.com (with admin@metfraa.com on CC) for payment.`,
+      title: 'Approve and send to Accounts?',
+      body: `You'll be recorded as the Management approver on this report, and the finalized PDF will be emailed to accounts@metfraa.com (with admin@metfraa.com on CC) for payment.`,
       confirmText: 'Approve',
     });
     if (!ok) return;
     showLoading('Approving…');
     try {
-      const endpoint = level === 'hr' ? 'approve-hr' : 'approve-mgmt';
-      const res = await api(`/api/admin/consolidated/${report.id}/${endpoint}`, { method: 'POST' });
+      const res = await api(`/api/admin/consolidated/${report.id}/approve-mgmt`, { method: 'POST' });
       if (res.email_ok === false) {
-        toast('Approved, but the follow-up email could not be sent. Use "Resend email" from the row.', 'success');
+        toast('Approved, but the accounts@ email couldn\'t be sent. Use "Resend" from the row.', 'success');
       } else {
-        toast(level === 'hr' ? 'Forwarded to Management' : 'Approved and sent to Accounts', 'success');
+        toast('Approved and sent to Accounts', 'success');
       }
       closeReview();
       await loadConsolidated();
@@ -4345,9 +4352,9 @@
     } finally { hideLoading(); }
   }
 
-  async function openRejectPrompt(report, level) {
+  async function openRejectPrompt(report) {
     const note = await promptModal({
-      title: level === 'hr' ? 'Send back to employee (HR reject)?' : 'Send back to employee (Management reject)?',
+      title: 'Send back to employee?',
       body: 'Explain what needs to change. This message goes to the employee — they can fix and resubmit even after the monthly deadline for these specific claims.',
       placeholder: 'e.g. Attach the missing bill for the outstation trip on 2026-07-14',
       required: true,
@@ -4359,7 +4366,7 @@
     try {
       const res = await api(`/api/admin/consolidated/${report.id}/reject`, {
         method: 'POST',
-        body: JSON.stringify({ level, note: note.trim() }),
+        body: JSON.stringify({ note: note.trim() }),
       });
       toast(`Report rejected · ${res.returned_submissions} submission${res.returned_submissions === 1 ? '' : 's'} returned to employee`, 'success');
       closeReview();
@@ -4372,9 +4379,8 @@
   async function resendEmail(report) {
     const ok = await confirmModal({
       title: 'Resend notification email?',
-      body: report.status === 'pending_hr' ? 'Resend the HR review email.'
-          : report.status === 'pending_mgmt' ? 'Resend the Management review email.'
-          : report.status === 'approved' ? 'Resend the accounts@ email with the finalized PDF attached.'
+      body: report.status === 'pending_mgmt' ? 'Resend the Management review email to arasu@metfraa.com.'
+          : report.status === 'approved' ? 'Resend the accounts@metfraa.com email with the finalized PDF attached.'
           : 'Resend the notification email.',
       confirmText: 'Resend',
     });
@@ -4388,19 +4394,28 @@
     } finally { hideLoading(); }
   }
 
-  // Handle the ?admin=consolidated&open=<id> deep link from email
+  // Handle the ?admin=consolidated&open=<id> deep link from email.
   async function maybeOpenReviewFromUrl() {
     const params = new URLSearchParams(window.location.search);
     if (params.get('admin') !== 'consolidated') return;
-    // Wait for admin data to load
     if (!state.isAdmin) return;
     switchTab('consolidated');
-    await loadConsolidated();
+    // The tab loads the monthly-summary, but the deep-link target might
+    // be a report from a DIFFERENT month than the current filter default.
+    // Fetch the report directly, set the month filter to its period, then
+    // reload the summary and open the review modal.
     const openId = parseInt(params.get('open'), 10);
     if (!Number.isFinite(openId) || openId <= 0) return;
-    const found = (state.consolidatedReports || []).find(r => r.id === openId);
-    if (found) openReview(found);
-    else toast(`Consolidated report #${openId} not found or not visible to you.`, 'error');
+    try {
+      const data = await api(`/api/admin/consolidated/${openId}`);
+      const report = data.report;
+      if (!report) { toast(`Consolidated report #${openId} not found.`, 'error'); return; }
+      $('#conMonth').value = report.period;
+      await loadConsolidated();
+      openReview(report);
+    } catch (err) {
+      toast(err.message || 'Could not open review link', 'error');
+    }
   }
 
   // ---- Dashboard (admin) --------------------------------------------
@@ -4688,7 +4703,6 @@
   // Consolidated Reports tab
   $('#conMonth')       && $('#conMonth').addEventListener('change', loadConsolidated);
   $('#conRefreshBtn')  && $('#conRefreshBtn').addEventListener('click', loadConsolidated);
-  $('#conGenerateBtn') && $('#conGenerateBtn').addEventListener('click', generateForMonth);
 
   boot();
 })();

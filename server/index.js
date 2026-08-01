@@ -168,15 +168,4 @@ app.listen(PORT, () => {
   console.log(`  Environment:   ${process.env.NODE_ENV || 'development'}`);
   console.log('═══════════════════════════════════════════════════');
   console.log('');
-
-  // Start the monthly consolidation scheduler. Runs on the 1st of each
-  // month at 00:15 IST, generating reports for the month that just ended.
-  // Safe to import & start unconditionally — the scheduler is idempotent
-  // and self-recovering on server restart.
-  try {
-    const { startScheduler } = require('./services/consolidate-scheduler');
-    startScheduler();
-  } catch (e) {
-    console.error('[consolidate] scheduler failed to start:', e);
-  }
 });

@@ -991,16 +991,20 @@ router.post('/period-overrides/:id/revoke', requireAdmin, (req, res) => {
 
 // ---- Consolidated Reports ------------------------------------------
 //
-//   GET  /api/admin/consolidated                       — all rows, most recent first
+//   GET  /api/admin/consolidated                       — all rows
 //   GET  /api/admin/consolidated?period=YYYY-MM        — filtered by month
-//   GET  /api/admin/consolidated/:id                   — one row + meta
+//   GET  /api/admin/consolidated/:id                   — one row
 //   GET  /api/admin/consolidated/:id/pdf               — stream the PDF
-//   POST /api/admin/consolidated/generate              — {period, employee_id?}
-//        manually generate for the given period (or one employee only)
-//   POST /api/admin/consolidated/regenerate-previous   — convenience: run
-//        the same job the cron would run tonight (previous IST month)
-//
-//   Turn 2 will add: /:id/approve-hr, /:id/approve-mgmt, /:id/reject
+//   GET  /api/admin/consolidated/monthly-summary       — per-employee rollup
+//                                                        for one month
+//   POST /api/admin/consolidated/send-for-approval     — {employee_id, period}
+//                                                        HR: send an employee's
+//                                                        report to Arasu once
+//                                                        every submission is
+//                                                        approved.
+//   POST /api/admin/consolidated/:id/approve-mgmt      — Arasu approves
+//   POST /api/admin/consolidated/:id/reject            — {note} (mgmt only)
+//   POST /api/admin/consolidated/:id/resend-email      — idempotent resend
 // -------------------------------------------------------------------
 
 router.get('/consolidated', requireAdmin, (req, res) => {
@@ -1013,6 +1017,28 @@ router.get('/consolidated', requireAdmin, (req, res) => {
   } catch (err) {
     console.error('[consolidated list]', err);
     res.status(500).json({ error: err.message || 'Could not list reports' });
+  }
+});
+
+// Per-employee rollup for a period. Used by the Monthly Wrap-up tab so
+// HR can see who's ready to send + who's still blocked by pending items.
+// Also merges in any existing consolidated_reports state so the same
+// UI shows both "not yet sent" and "already at Arasu" employees.
+router.get('/consolidated/monthly-summary', requireAdmin, (req, res) => {
+  try {
+    const period = (req.query.period || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: 'period must be YYYY-MM' });
+    const rollups = stmts.listMonthlySummaryForPeriod.all(period);
+    const reports = stmts.listConsolidatedReportsForPeriod.all(period);
+    const byEmp = new Map(reports.map(r => [r.employee_id, r]));
+    const rows = rollups.map(r => ({
+      ...r,
+      consolidated_report: byEmp.get(r.employee_id) || null,
+    }));
+    res.json({ period, rows });
+  } catch (err) {
+    console.error('[monthly-summary]', err);
+    res.status(500).json({ error: err.message || 'Fetch failed' });
   }
 });
 
@@ -1033,7 +1059,7 @@ router.get('/consolidated/:id/pdf', requireAdmin, (req, res) => {
     const r = stmts.getConsolidatedReport.get(id);
     if (!r) return res.status(404).send('Not found');
     if (!r.pdf_path || !require('fs').existsSync(r.pdf_path)) {
-      return res.status(404).send('PDF file missing on disk. Regenerate the report.');
+      return res.status(404).send('PDF file missing on disk.');
     }
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="consolidated-${r.period}-${(r.employee_name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_')}.pdf"`);
@@ -1043,116 +1069,21 @@ router.get('/consolidated/:id/pdf', requireAdmin, (req, res) => {
   }
 });
 
-router.post('/consolidated/generate', requireAdmin, async (req, res) => {
+// HR clicks "Send for final approval" on a row in the Monthly Wrap-up.
+router.post('/consolidated/send-for-approval', requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
+    const employeeId = parseInt(body.employee_id, 10);
     const period = (body.period || '').trim();
+    if (!Number.isFinite(employeeId) || employeeId <= 0) return res.status(400).json({ error: 'invalid employee_id' });
     if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: 'period must be YYYY-MM' });
 
-    const { generateForPeriod, generateForEmployeePeriod } = require('../services/consolidate-scheduler');
-    const { notifyHr } = require('../services/consolidated-approval');
-    // Skip HR notification only if the caller explicitly opts out (e.g. dry-run)
-    const suppressEmail = body.suppress_email === true;
-
-    if (body.employee_id != null && body.employee_id !== '') {
-      const empId = parseInt(body.employee_id, 10);
-      if (!Number.isFinite(empId) || empId <= 0) return res.status(400).json({ error: 'invalid employee_id' });
-      const result = await generateForEmployeePeriod(empId, period, { generatedBy: req.user.email });
-
-      // Fire the HR review email if the report actually got generated
-      // (skipped = no approved submissions found for this employee/period)
-      let notifyResult = null;
-      if (!result.skipped && !suppressEmail) {
-        const cr = stmts.getConsolidatedReportByEmpPeriod.get(empId, period);
-        if (cr) notifyResult = await notifyHr(cr.id);
-      }
-
-      stmts.insertAudit.run({
-        actor_email: req.user.email, action: 'GENERATE_CONSOLIDATED',
-        target_type: 'consolidated_report', target_id: 0,
-        meta_json: JSON.stringify({ period, employee_id: empId, result, notify: notifyResult }),
-        ip_address: req.ip,
-      });
-
-      return res.json({ ok: true, ...result, notify: notifyResult });
-    }
-
-    const summary = await generateForPeriod(period, { generatedBy: req.user.email });
-
-    // Fan out HR review emails for every new/regenerated report
-    let notifyCount = 0, notifyErrors = 0;
-    if (!suppressEmail) {
-      for (const r of (summary.results || [])) {
-        if (!r.ok || r.skipped) continue;
-        try {
-          const cr = stmts.getConsolidatedReportByEmpPeriod.get(r.employee_id, period);
-          if (cr) {
-            const nr = await notifyHr(cr.id);
-            if (nr.email_ok) notifyCount++; else notifyErrors++;
-          }
-        } catch (e) {
-          notifyErrors++;
-          console.error(`[generate] notifyHr failed for emp ${r.employee_id}:`, e);
-        }
-      }
-    }
-
-    stmts.insertAudit.run({
-      actor_email: req.user.email, action: 'GENERATE_CONSOLIDATED_BATCH',
-      target_type: 'consolidated_report', target_id: 0,
-      meta_json: JSON.stringify({ period, generated: summary.generated, notified: notifyCount, notify_errors: notifyErrors }),
-      ip_address: req.ip,
-    });
-    res.json({ ok: true, ...summary, notified: notifyCount, notify_errors: notifyErrors });
-  } catch (err) {
-    console.error('[consolidated generate]', err);
-    res.status(500).json({ error: err.message || 'Generation failed' });
-  }
-});
-
-router.post('/consolidated/regenerate-previous', requireAdmin, async (req, res) => {
-  try {
-    const { generateForPeriod, previousMonthPeriod } = require('../services/consolidate-scheduler');
-    const { notifyHr } = require('../services/consolidated-approval');
-    const period = previousMonthPeriod();
-    const summary = await generateForPeriod(period, { generatedBy: req.user.email });
-
-    let notifyCount = 0;
-    for (const r of (summary.results || [])) {
-      if (!r.ok || r.skipped) continue;
-      try {
-        const cr = stmts.getConsolidatedReportByEmpPeriod.get(r.employee_id, period);
-        if (cr) { await notifyHr(cr.id); notifyCount++; }
-      } catch (_) {}
-    }
-
-    stmts.insertAudit.run({
-      actor_email: req.user.email, action: 'GENERATE_CONSOLIDATED_BATCH',
-      target_type: 'consolidated_report', target_id: 0,
-      meta_json: JSON.stringify({ period, generated: summary.generated, notified: notifyCount, trigger: 'regen-previous' }),
-      ip_address: req.ip,
-    });
-    res.json({ ok: true, ...summary, notified: notifyCount });
-  } catch (err) {
-    console.error('[consolidated regen-previous]', err);
-    res.status(500).json({ error: err.message || 'Regen failed' });
-  }
-});
-
-// ---- Approval workflow endpoints -------------------------------
-// POST /consolidated/:id/approve-hr    { }
-// POST /consolidated/:id/approve-mgmt  { }
-// POST /consolidated/:id/reject        { level: 'hr'|'mgmt', note: '...' }
-
-router.post('/consolidated/:id/approve-hr', requireAdmin, async (req, res) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { approveHr } = require('../services/consolidated-approval');
-    const result = await approveHr(id, req.user.email);
+    const { sendForApproval } = require('../services/consolidated-approval');
+    const result = await sendForApproval(employeeId, period, req.user.email);
     res.json(result);
   } catch (err) {
-    console.error('[approve-hr]', err);
-    res.status(400).json({ error: err.message || 'Approval failed' });
+    console.error('[send-for-approval]', err);
+    res.status(400).json({ error: err.message || 'Send failed' });
   }
 });
 
@@ -1172,10 +1103,8 @@ router.post('/consolidated/:id/reject', requireAdmin, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const body = req.body || {};
-    const level = body.level;
-    const note = body.note;
     const { rejectReport } = require('../services/consolidated-approval');
-    const result = rejectReport(id, level, note, req.user.email);
+    const result = rejectReport(id, body.note, req.user.email);
     res.json(result);
   } catch (err) {
     console.error('[reject-consolidated]', err);
@@ -1183,8 +1112,6 @@ router.post('/consolidated/:id/reject', requireAdmin, async (req, res) => {
   }
 });
 
-// Resend the review email at whichever stage the report is currently in
-// (idempotent — safe to click if HR/Mgmt didn't get the first one).
 router.post('/consolidated/:id/resend-email', requireAdmin, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -1192,9 +1119,8 @@ router.post('/consolidated/:id/resend-email', requireAdmin, async (req, res) => 
     if (!r) return res.status(404).json({ error: 'Not found' });
     const { sendConsolidatedForReview, sendConsolidatedToAccounts } = require('../services/email');
     const emp = { id: r.employee_id, name: r.employee_name, email: r.employee_email, code: r.employee_code };
-    if (r.status === 'pending_hr')   await sendConsolidatedForReview({ report: r, employee: emp, stage: 'hr' });
-    else if (r.status === 'pending_mgmt') await sendConsolidatedForReview({ report: r, employee: emp, stage: 'mgmt' });
-    else if (r.status === 'approved')     await sendConsolidatedToAccounts({ report: r, employee: emp, pdfPath: r.pdf_path });
+    if (r.status === 'pending_mgmt')       await sendConsolidatedForReview({ report: r, employee: emp, stage: 'mgmt' });
+    else if (r.status === 'approved')      await sendConsolidatedToAccounts({ report: r, employee: emp, pdfPath: r.pdf_path });
     else return res.status(400).json({ error: `Nothing to resend for status '${r.status}'` });
     res.json({ ok: true });
   } catch (err) {

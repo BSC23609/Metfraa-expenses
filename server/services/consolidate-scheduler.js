@@ -1,26 +1,19 @@
 // ====================================================================
-//  Consolidation orchestrator
+//  Consolidation service (on-demand)
 // ====================================================================
-//   Ties together the pieces:
-//    - schedules the monthly job (setTimeout-based, IST-aware)
-//    - drives buildConsolidatedReport for every eligible employee
-//    - persists a consolidated_reports row per employee via UPSERT
+//   Previously ran on a monthly cron; now purely on-demand — HR clicks
+//   "Send for final approval" from the portal, and this file's helpers
+//   generate the PDF + persist the row.
 //
-//   Timing: runs at 00:15 IST on the 1st of every month for the month
-//   that just ended. The 15-min buffer past midnight gives room for any
-//   last-second submissions on the last day to fully commit.
-//
-//   Turn 2 will add: email dispatch (to admin@), status transitions,
-//   sign-off overlays on the PDF, rejection → deadline_bypass propagation.
+//   Filename kept as consolidate-scheduler.js only to avoid churning
+//   the four require() paths that already point here. No scheduler
+//   logic remains.
 // ====================================================================
 
 const fs = require('fs');
 const path = require('path');
 const { stmts } = require('../db');
 const { buildConsolidatedReport } = require('./consolidated-report');
-const { istParts } = require('./period-lock');
-
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 // Where consolidated PDFs are written on disk. Falls back to DATA_DIR
 // when set (persistent volume on Render).
@@ -31,61 +24,21 @@ function outputsDir() {
   return dir;
 }
 
-// Given a base date, compute the previous IST calendar month as 'YYYY-MM'.
-function previousMonthPeriod(baseDate = new Date()) {
-  const { year, month } = istParts(baseDate);
-  const prevY = month === 1 ? year - 1 : year;
-  const prevM = month === 1 ? 12 : month - 1;
-  return `${prevY}-${String(prevM).padStart(2, '0')}`;
-}
-
-// Compute when the next scheduled run should fire (UTC ms since epoch).
-// Rule: 00:15 IST on the 1st of the next month. That's 18:45 UTC on the
-// last day of the current IST month.
-//
-// SPECIAL CASE: July 2026. The July cutoff was extended to Aug 1 23:59
-// IST (see period-lock.js). Consolidation for that cycle needs to run
-// AFTER the cutoff, roughly one hour later: Aug 2 01:00 IST = Aug 1
-// 19:30 UTC. Applies ONLY if we haven't yet run past that instant.
-function nextRunUtcMs(now = new Date()) {
-  // One-shot: July 2026 special run.
-  const jul2026Run = Date.UTC(2026, 7, 1, 19, 30);   // Aug 2 01:00 IST
-  if (now.getTime() < jul2026Run) return jul2026Run;
-
-  const nowIst = istParts(now);
-  // The 1st of NEXT IST month at 00:15 IST
-  const nextMonthYear = nowIst.month === 12 ? nowIst.year + 1 : nowIst.year;
-  const nextMonthNum  = nowIst.month === 12 ? 1 : nowIst.month + 1;
-  // Construct UTC moment for 00:15 IST = 18:45 UTC the day BEFORE (i.e.
-  // the last day of the current month). We express it directly:
-  const targetIstYmd = new Date(Date.UTC(nextMonthYear, nextMonthNum - 1, 1, 0, 15));
-  // Subtract IST offset to get the UTC instant
-  return targetIstYmd.getTime() - IST_OFFSET_MS;
-}
-
-// Generate consolidated reports for one specific period. Returns a
-// summary object.
-async function generateForPeriod(period, { generatedBy = 'cron' } = {}) {
-  const employees = stmts.listEmployeesWithApprovedForPeriod.all(period);
-  const results = [];
-  for (const emp of employees) {
-    try {
-      const result = await generateForEmployeePeriod(emp.id, period, { generatedBy, employee: emp });
-      results.push({ employee_id: emp.id, employee_name: emp.name, ok: true, ...result });
-    } catch (e) {
-      console.error(`[consolidate] failed for ${emp.name} ${period}:`, e);
-      results.push({ employee_id: emp.id, employee_name: emp.name, ok: false, error: e.message });
-    }
-  }
-  return { period, generated: results.length, results };
-}
-
-// Generate for one specific (employee, period). Skips if no approved
-// submissions found. Called from generateForPeriod and from a manual
-// regenerate endpoint. `signoffs` is optional {hr:{by,at},mgmt:{by,at}} —
-// when provided, they're drawn onto the cover page so the approved PDF
-// carries the audit trail.
-async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cron', employee = null, signoffs = null, keepStatus = false } = {}) {
+/**
+ * Generate a consolidated PDF for one (employee, period) and persist
+ * a consolidated_reports row (or update an existing one).
+ *
+ * @param {number} employeeId
+ * @param {string} period    - 'YYYY-MM'
+ * @param {object} opts
+ * @param {string} opts.generatedBy - email of the actor (HR when sending, or 'system')
+ * @param {object} opts.employee    - optional pre-fetched employee row
+ * @param {object} opts.signoffs    - optional {hr:{by,at},mgmt:{by,at}} for cover overlay
+ * @param {boolean} opts.keepStatus - if true, only swap the PDF file/pages
+ *                                    without wiping approval columns (used on
+ *                                    approval regen after Mgmt signs off).
+ */
+async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'system', employee = null, signoffs = null, keepStatus = false } = {}) {
   const submissions = stmts.listApprovedForConsolidation.all(employeeId, period);
   if (!submissions.length) return { skipped: true, reason: 'no-approved-submissions' };
 
@@ -93,8 +46,7 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cr
     const e = stmts.getEmployeeById.get(employeeId);
     if (!e) throw new Error(`Employee ${employeeId} not found`);
     // getEmployeeById returns the raw column `employee_code`; the PDF
-    // builder reads `.code`. Normalise so both callers see the same
-    // shape.
+    // builder reads `.code`. Normalise so both callers see the same shape.
     if (e.code == null && e.employee_code != null) e.code = e.employee_code;
     return e;
   })();
@@ -125,9 +77,8 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cr
   }, 0);
 
   if (keepStatus) {
-    // In-place re-render (used after HR/Mgmt approval to bake sign-offs
-    // into the PDF without wiping the report's approval status). Only
-    // updates the file path + page count.
+    // In-place re-render — used after Mgmt approval to bake sign-offs
+    // into the PDF without wiping the report's approval columns.
     stmts.updateConsolidatedReportPdf.run({
       employee_id: emp.id, period,
       pdf_path: writtenPath, pdf_page_count: pageCount,
@@ -145,81 +96,13 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cr
     });
   }
 
-  return { skipped: false, pdf_path: writtenPath, page_count: pageCount, total_amount: +totalAmount.toFixed(2) };
+  return {
+    skipped: false,
+    pdf_path: writtenPath,
+    page_count: pageCount,
+    total_amount: +totalAmount.toFixed(2),
+    submission_count: submissions.length,
+  };
 }
 
-// -----------------------------------------------------------------
-// Scheduler. Node lives forever on Render web services (until restart);
-// we schedule the next run via setTimeout and reschedule after the job
-// completes. On process start we log the next run time so it's visible
-// in the Render logs.
-//
-// If somehow we START past the intended run time (e.g. the server was
-// down at 00:15 IST), we DO NOT catch up automatically — that job's
-// window is missed and admins can manually regenerate via the API.
-// Auto-catch-up is risky (could generate reports from stale/deleted data
-// or run days after the fact); manual is safer.
-// -----------------------------------------------------------------
-let _timer = null;
-
-function startScheduler() {
-  if (_timer) clearTimeout(_timer);
-  const nowMs = Date.now();
-  const runAt = nextRunUtcMs(new Date());
-  const delay = runAt - nowMs;
-  const runAtIso = new Date(runAt).toISOString();
-  console.log(`[consolidate] next auto-run at ${runAtIso} (${Math.round(delay / 1000 / 60)} min from now)`);
-
-  // setTimeout's max delay is ~24.8 days (2^31 - 1 ms). If the target is
-  // further out (shouldn't be with monthly cadence), cap and reschedule.
-  const MAX = 2 ** 31 - 1;
-  const capped = Math.min(delay, MAX);
-
-  _timer = setTimeout(async () => {
-    if (delay > MAX) {
-      // Not time yet; just reschedule to keep chipping through.
-      startScheduler();
-      return;
-    }
-    try {
-      const period = previousMonthPeriod();
-      console.log(`[consolidate] auto-run starting for period ${period}`);
-      const summary = await generateForPeriod(period, { generatedBy: 'cron' });
-      console.log(`[consolidate] auto-run done for ${period}: ${summary.generated} generated`);
-
-      // Fan out HR review emails. Lazy-required to avoid a circular
-      // require between this file and consolidated-approval (which itself
-      // imports generateForEmployeePeriod from us).
-      try {
-        const { notifyHr } = require('./consolidated-approval');
-        let notified = 0, errs = 0;
-        for (const r of (summary.results || [])) {
-          if (!r.ok || r.skipped) continue;
-          try {
-            const cr = stmts.getConsolidatedReportByEmpPeriod.get(r.employee_id, period);
-            if (cr) { await notifyHr(cr.id); notified++; }
-          } catch (e) {
-            errs++;
-            console.error(`[consolidate] notifyHr failed for emp ${r.employee_id}:`, e);
-          }
-        }
-        console.log(`[consolidate] HR notified: ${notified} · errors: ${errs}`);
-      } catch (e) {
-        console.error('[consolidate] HR notification stage failed:', e);
-      }
-    } catch (e) {
-      console.error('[consolidate] auto-run failed:', e);
-    } finally {
-      // Reschedule for next month
-      startScheduler();
-    }
-  }, capped);
-}
-
-module.exports = {
-  startScheduler,
-  generateForPeriod,
-  generateForEmployeePeriod,
-  previousMonthPeriod,
-  nextRunUtcMs,
-};
+module.exports = { generateForEmployeePeriod };

@@ -1,23 +1,24 @@
 // ====================================================================
-//  Consolidated Report Approval Workflow (Turn 2)
+//  Consolidated Report Approval Workflow
 // ====================================================================
-//   Owns the state machine transitions + email side-effects + rollback
-//   on rejection.
+//   Purely on-demand now — HR clicks "Send for final approval" from the
+//   Monthly Summary view once every submission for an employee/month is
+//   approved/settled.
 //
-//     draft (post-generation)
-//        └─▶ notifyHr()      → email admin@, status='pending_hr'
-//     pending_hr
-//        ├─▶ approveHr()     → email arasu@, status='pending_mgmt',
-//        │                    regenerate PDF with HR sign-off overlay
-//        └─▶ rejectAtHr()    → propagate reject-with-note to submissions,
-//                              status='rejected'
+//     (no row yet)
+//        └─▶ sendForApproval()  → generate PDF (with HR sign-off on
+//                                 cover), UPSERT row, transition to
+//                                 pending_mgmt, email arasu@ CC admin@
 //     pending_mgmt
-//        ├─▶ approveMgmt()   → email accounts@ CC admin@, status='approved',
-//        │                    regenerate PDF with both sign-offs overlaid
-//        └─▶ rejectAtMgmt()  → same as rejectAtHr but attributed to Mgmt
+//        ├─▶ approveMgmt()  → regen PDF with both sign-offs, mark
+//        │                    approved, email accounts@ CC admin@ with
+//        │                    the finalized PDF attached
+//        └─▶ rejectReport() → mark rejected, return every submission to
+//                             the employee (status='draft',
+//                             deadline_bypass=1, note in changes_required)
 //
-//   All email failures are fail-soft — the state transition sticks and
-//   the error is logged in the report row for HR to see.
+//   Email failures are fail-soft — the state transition sticks, and
+//   the error is logged. HR can use "Resend email" from the portal.
 // ====================================================================
 
 const { stmts, db } = require('../db');
@@ -27,7 +28,7 @@ const {
 } = require('./email');
 const { generateForEmployeePeriod } = require('./consolidate-scheduler');
 
-// Look up the report + hydrate employee info.
+// Load report + hydrate employee.
 function loadReportAndEmployee(reportId) {
   const report = stmts.getConsolidatedReport.get(reportId);
   if (!report) throw new Error(`Consolidated report ${reportId} not found`);
@@ -40,8 +41,8 @@ function loadReportAndEmployee(reportId) {
   return { report, employee };
 }
 
-// Extract signoffs (name + timestamp) as a plain object suitable for the
-// PDF overlay. Only includes filled tiers.
+// Extract sign-offs (name + timestamp) for the PDF cover overlay. Only
+// includes tiers that have been filled.
 function signoffsFor(report) {
   const out = {};
   if (report.hr_approved_by)   out.hr   = { by: report.hr_approved_by,   at: report.hr_approved_at };
@@ -50,81 +51,111 @@ function signoffsFor(report) {
 }
 
 // -----------------------------------------------------------------
-// notifyHr — called immediately after a consolidated report is
-// generated. Fires the HR review email + flips status to pending_hr.
-// Idempotent: if the report is already pending_hr, resending the email
-// is fine (the SQL guard filters draft/pending_hr).
+// sendForApproval — the entry point. HR calls this after they've
+// individually verified (approved) every submission for the given
+// (employee, period). Precondition check: no pending/draft submissions
+// remain for that (employee, period).
+//
+//   1. Guard: refuse if any submission is still pending/draft/rejected.
+//   2. Guard: refuse if a report is already pending_mgmt/approved.
+//   3. Generate PDF (via generateForEmployeePeriod). This UPSERTs a
+//      consolidated_reports row in status='draft'.
+//   4. Overlay HR sign-off (actorEmail + now) and re-emit PDF.
+//   5. Flip status draft → pending_mgmt, recording HR identity.
+//   6. Email arasu@metfraa.com (CC admin@).
 // -----------------------------------------------------------------
-async function notifyHr(reportId) {
-  const { report, employee } = loadReportAndEmployee(reportId);
-  if (!['draft', 'pending_hr'].includes(report.status)) {
-    return { skipped: true, reason: `report is ${report.status}` };
+async function sendForApproval(employeeId, period, actorEmail) {
+  // 1) Precondition: every submission for this (employee, period) is in
+  // a terminal-good state (approved or settled). Anything else — pending,
+  // draft, rejected, advance_approved — blocks the send.
+  const rollup = stmts.listMonthlySummaryForPeriod.all(period).find(r => r.employee_id === employeeId);
+  if (!rollup) throw new Error('No submissions found for that employee in that month.');
+  const blockers = [];
+  if (rollup.pending_count > 0)          blockers.push(`${rollup.pending_count} pending`);
+  if (rollup.draft_count > 0)            blockers.push(`${rollup.draft_count} draft`);
+  if (rollup.advance_approved_count > 0) blockers.push(`${rollup.advance_approved_count} awaiting settlement`);
+  if (rollup.rejected_count > 0)         blockers.push(`${rollup.rejected_count} rejected (must be re-submitted & approved, or excluded)`);
+  if (blockers.length) {
+    throw new Error(`Cannot send yet — ${blockers.join(', ')}. All submissions must be approved/settled first.`);
   }
-  let emailResult = null;
-  let emailErr = null;
-  try {
-    emailResult = await sendConsolidatedForReview({ report, employee, stage: 'hr' });
-  } catch (e) {
-    emailErr = e.message || String(e);
-    console.error(`[consolidate.notifyHr] email failed for report ${reportId}:`, e);
+  if ((rollup.approved_count + rollup.settled_count) === 0) {
+    throw new Error('Nothing to send — this employee has no approved/settled submissions for that month.');
   }
-  // Flip state regardless — HR can still open the report in the portal
-  // even if the notification bounced.
-  stmts.markConsolidatedPendingHr.run(reportId);
-  return { ok: true, email_ok: !emailErr, email_error: emailErr, email_result: emailResult };
-}
 
-// -----------------------------------------------------------------
-// approveHr — HR clicks "Approve" on the review page. Records who/when,
-// regenerates the PDF so the HR sign-off appears on the cover, then
-// notifies Management.
-// -----------------------------------------------------------------
-async function approveHr(reportId, actorEmail) {
-  const { report: pre, employee } = loadReportAndEmployee(reportId);
-  if (pre.status !== 'pending_hr') throw new Error(`Cannot HR-approve: report is ${pre.status}`);
+  // 2) If a report already exists, block from re-sending unless it's
+  // been rejected (which allows a fresh send).
+  const existing = stmts.getConsolidatedReportByEmpPeriod.get(employeeId, period);
+  if (existing) {
+    if (existing.status === 'pending_mgmt') {
+      throw new Error('A report has already been sent for approval. Use "Resend email" if Arasu didn\'t receive it.');
+    }
+    if (existing.status === 'approved') {
+      throw new Error('This report is already approved. Payment has been sent to accounts.');
+    }
+    // 'rejected' → allowed to re-send. Fall through.
+    // 'draft' → weird intermediate state (interrupted send); fall through, we'll re-overwrite.
+  }
 
-  // Transactional: state flip is atomic
-  stmts.markConsolidatedHrApproved.run(actorEmail, reportId);
+  // 3) Generate PDF + upsert (status='draft' at this point)
+  await generateForEmployeePeriod(employeeId, period, {
+    generatedBy: actorEmail,
+    // No sign-offs yet — we lay in HR's after the UPSERT so the persisted
+    // hr_approved_by column drives the overlay from a single source of truth.
+  });
 
-  // Refresh + regenerate PDF with HR sign-off overlay
-  const { report } = loadReportAndEmployee(reportId);
+  // 4) Re-fetch, overlay HR signature, re-render. We do this in two
+  // passes so the cover PDF and the DB row agree on the timestamp.
+  const cr = stmts.getConsolidatedReportByEmpPeriod.get(employeeId, period);
+  if (!cr) throw new Error('Report generation produced no row — this is a bug.');
+
+  // 5) State flip + HR identity
+  stmts.markConsolidatedSentForApproval.run(actorEmail, cr.id);
+
+  // 6) Re-render PDF with HR sign-off
+  const { report: signedReport, employee } = loadReportAndEmployee(cr.id);
   try {
-    await generateForEmployeePeriod(report.employee_id, report.period, {
+    await generateForEmployeePeriod(signedReport.employee_id, signedReport.period, {
       generatedBy: actorEmail,
       employee,
-      signoffs: signoffsFor(report),
-      keepStatus: true,   // don't reset approval state
+      signoffs: signoffsFor(signedReport),
+      keepStatus: true,
     });
   } catch (e) {
-    console.error(`[consolidate.approveHr] PDF regen failed for report ${reportId}:`, e);
-    // Non-fatal — the state is already flipped; PDF just won't show HR sig
+    console.error(`[sendForApproval] PDF signoff overlay failed:`, e);
+    // Non-fatal — state is already correct, PDF is just missing the
+    // signature visual (row has the data).
   }
 
-  // Notify Mgmt
+  // 7) Email arasu@ (CC admin@)
   let emailErr = null;
   try {
-    await sendConsolidatedForReview({ report, employee, stage: 'mgmt' });
+    await sendConsolidatedForReview({ report: signedReport, employee, stage: 'mgmt' });
   } catch (e) {
     emailErr = e.message || String(e);
-    console.error(`[consolidate.approveHr] mgmt email failed for report ${reportId}:`, e);
+    console.error(`[sendForApproval] arasu email failed:`, e);
   }
 
   stmts.insertAudit.run({
     actor_email: actorEmail,
-    action: 'CONSOLIDATED_HR_APPROVE',
+    action: 'CONSOLIDATED_SEND_FOR_APPROVAL',
     target_type: 'consolidated_report',
-    target_id: reportId,
-    meta_json: JSON.stringify({ period: report.period, employee_id: report.employee_id, email_err: emailErr }),
+    target_id: cr.id,
+    meta_json: JSON.stringify({
+      employee_id: employeeId, period,
+      submission_count: signedReport.submission_count,
+      total_amount: signedReport.total_amount,
+      email_err: emailErr,
+    }),
     ip_address: null,
   });
 
-  return { ok: true, next_stage: 'pending_mgmt', email_ok: !emailErr };
+  return { ok: true, report_id: cr.id, email_ok: !emailErr };
 }
 
 // -----------------------------------------------------------------
-// approveMgmt — Management clicks "Approve" on the review page.
-// Regenerates the PDF with BOTH sign-offs, then emails accounts@ with
-// the finalized PDF attached (admin@ on CC).
+// approveMgmt — Arasu clicks Approve. Regenerates PDF with both
+// sign-offs stamped, marks approved, emails accounts@ (CC admin@)
+// with the finalized PDF attached.
 // -----------------------------------------------------------------
 async function approveMgmt(reportId, actorEmail) {
   const { report: pre, employee } = loadReportAndEmployee(reportId);
@@ -132,7 +163,7 @@ async function approveMgmt(reportId, actorEmail) {
 
   stmts.markConsolidatedMgmtApproved.run(actorEmail, reportId);
 
-  // Refresh + regenerate with both sign-offs
+  // Refresh to capture the mgmt sign-off timestamps
   const { report } = loadReportAndEmployee(reportId);
   try {
     await generateForEmployeePeriod(report.employee_id, report.period, {
@@ -142,20 +173,20 @@ async function approveMgmt(reportId, actorEmail) {
       keepStatus: true,
     });
   } catch (e) {
-    console.error(`[consolidate.approveMgmt] PDF regen failed:`, e);
+    console.error(`[approveMgmt] PDF regen failed:`, e);
   }
 
   // Re-load to get the up-to-date pdf_path
   const { report: refreshed } = loadReportAndEmployee(reportId);
   const pdfPath = refreshed.pdf_path;
 
-  // Send to accounts@
+  // Send to accounts@ (CC admin@)
   let emailErr = null;
   try {
     await sendConsolidatedToAccounts({ report: refreshed, employee, pdfPath });
   } catch (e) {
     emailErr = e.message || String(e);
-    console.error(`[consolidate.approveMgmt] accounts email failed:`, e);
+    console.error(`[approveMgmt] accounts email failed:`, e);
     try {
       db.prepare(`UPDATE consolidated_reports SET accounts_email_error = ? WHERE id = ?`)
         .run(emailErr.slice(0, 480), reportId);
@@ -167,7 +198,11 @@ async function approveMgmt(reportId, actorEmail) {
     action: 'CONSOLIDATED_MGMT_APPROVE',
     target_type: 'consolidated_report',
     target_id: reportId,
-    meta_json: JSON.stringify({ period: refreshed.period, employee_id: refreshed.employee_id, email_err: emailErr }),
+    meta_json: JSON.stringify({
+      period: refreshed.period,
+      employee_id: refreshed.employee_id,
+      email_err: emailErr,
+    }),
     ip_address: null,
   });
 
@@ -175,42 +210,25 @@ async function approveMgmt(reportId, actorEmail) {
 }
 
 // -----------------------------------------------------------------
-// reject — shared HR + Mgmt rejection path. Level is 'hr' | 'mgmt'.
-//
-//   1. Flip the report row to status='rejected' + store the note.
-//   2. For every submission in the report:
-//        - status → 'draft'
-//        - deadline_bypass → 1  (lets them resubmit past the cutoff)
-//        - changes_required → the rejection note
-//   3. Employee's next login shows the "Action required" hub card.
-//   4. Audit log records the rejection.
-//
-// We do NOT send a per-submission email; the employee will notice on
-// their next visit. (Turn 3 could add an email if you want it.)
+// rejectReport — Arasu clicks Reject with a note. All submissions in the
+// report are returned to the employee as drafts with deadline_bypass=1
+// and the rejection note in changes_required. Only Management can reject
+// at the consolidated level now (HR effectively pre-approved by sending).
 // -----------------------------------------------------------------
-function rejectReport(reportId, level, note, actorEmail) {
-  if (!['hr', 'mgmt'].includes(level)) throw new Error('invalid level');
+function rejectReport(reportId, note, actorEmail) {
   const { report } = loadReportAndEmployee(reportId);
-  if (!['pending_hr', 'pending_mgmt'].includes(report.status)) {
+  if (report.status !== 'pending_mgmt') {
     throw new Error(`Cannot reject: report is ${report.status}`);
   }
   const trimmed = String(note || '').trim();
   if (trimmed.length < 3) throw new Error('Rejection note is required (3+ chars).');
   if (trimmed.length > 2000) throw new Error('Rejection note is too long (max 2000 chars).');
 
-  // Guard mismatched level vs state — HR can't reject at mgmt level
-  if (level === 'hr'   && report.status !== 'pending_hr')   throw new Error('Report is not pending HR review.');
-  if (level === 'mgmt' && report.status !== 'pending_mgmt') throw new Error('Report is not pending management review.');
-
-  // Do the state changes in one atomic transaction
   const tx = db.transaction(() => {
-    stmts.markConsolidatedRejected.run({ id: reportId, level, reason: trimmed });
-    // Return each included submission to the employee as a draft with
-    // deadline_bypass=1 and the rejection note in changes_required.
+    stmts.markConsolidatedRejected.run({ id: reportId, reason: trimmed });
     let ids = [];
     try { ids = JSON.parse(report.submission_ids || '[]'); } catch (_) {}
-    const noteWithAttribution =
-      (level === 'hr' ? '[HR rejection] ' : '[Management rejection] ') + trimmed;
+    const noteWithAttribution = '[Management rejection] ' + trimmed;
     for (const sid of ids) {
       stmts.bypassSubmissionForResubmit.run(noteWithAttribution, sid);
     }
@@ -220,7 +238,7 @@ function rejectReport(reportId, level, note, actorEmail) {
 
   stmts.insertAudit.run({
     actor_email: actorEmail,
-    action: level === 'hr' ? 'CONSOLIDATED_HR_REJECT' : 'CONSOLIDATED_MGMT_REJECT',
+    action: 'CONSOLIDATED_MGMT_REJECT',
     target_type: 'consolidated_report',
     target_id: reportId,
     meta_json: JSON.stringify({
@@ -236,8 +254,7 @@ function rejectReport(reportId, level, note, actorEmail) {
 }
 
 module.exports = {
-  notifyHr,
-  approveHr,
+  sendForApproval,
   approveMgmt,
   rejectReport,
   signoffsFor,
