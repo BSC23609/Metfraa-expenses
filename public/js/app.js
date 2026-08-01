@@ -4159,18 +4159,20 @@
           : cr.status === 'rejected'   ? 'rejected · returned to employee'
           : cr.status);
       } else if (allClear) {
-        statusCell = el('span', { class: 'status-pill approved' }, 'ready to send');
+        statusCell = el('span', { class: 'status-pill approved' }, '✓ unlocked · ready to send');
         readyCount++;
       } else if (pendingLike > 0) {
+        // Locked state — some HR review still to do. Read as a lock so
+        // the visual clearly communicates "not touchable yet".
         const blockers = [];
         if (r.pending_count > 0)          blockers.push(`${r.pending_count} pending`);
         if (r.draft_count > 0)            blockers.push(`${r.draft_count} draft`);
         if (r.advance_approved_count > 0) blockers.push(`${r.advance_approved_count} advance`);
-        statusCell = el('span', { class: 'status-pill pending' }, blockers.join(' · '));
+        statusCell = el('span', { class: 'status-pill pending' }, `🔒 locked · ${blockers.join(' · ')}`);
       } else if (rejectedInMonth > 0 && approvedLike === 0) {
-        statusCell = el('span', { class: 'status-pill rejected' }, 'all rejected');
+        statusCell = el('span', { class: 'status-pill rejected' }, '🔒 locked · all rejected');
       } else if (rejectedInMonth > 0) {
-        statusCell = el('span', { class: 'status-pill rejected' }, `${rejectedInMonth} rejected — needs cleanup`);
+        statusCell = el('span', { class: 'status-pill rejected' }, `🔒 locked · ${rejectedInMonth} rejected — needs cleanup`);
       } else {
         statusCell = el('span', { class: 'status-pill draft' }, '—');
       }
@@ -4203,6 +4205,9 @@
               class: 'approve', style: 'background:#059669;border-color:#059669;',
               onclick: () => sendForApproval(r, period),
             }, 'Re-send for approval'));
+          } else {
+            actions.appendChild(el('span', { style: 'font-size:11px;color:var(--bsg-muted);' },
+              '🔒 fix rejected submissions first'));
           }
         }
       } else if (allClear) {
@@ -4211,8 +4216,15 @@
           onclick: () => sendForApproval(r, period),
         }, 'Send for final approval'));
       } else {
-        actions.appendChild(el('span', { style: 'font-size:11px;color:var(--bsg-muted);' },
-          'Approve remaining submissions first'));
+        // Locked — HR still has submissions to approve. Show it as a
+        // clearly disabled affordance so it reads as "not touchable yet"
+        // instead of just muted text.
+        actions.appendChild(el('button', {
+          class: 'approve',
+          disabled: true,
+          style: 'background:#e5e7eb;border-color:#e5e7eb;color:#9ca3af;cursor:not-allowed;',
+          title: 'Approve every remaining submission before this employee\'s consolidated report can be sent.',
+        }, '🔒 Send for final approval'));
       }
 
       tbody.appendChild(el('tr', {},
