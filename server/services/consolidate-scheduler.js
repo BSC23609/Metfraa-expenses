@@ -42,7 +42,16 @@ function previousMonthPeriod(baseDate = new Date()) {
 // Compute when the next scheduled run should fire (UTC ms since epoch).
 // Rule: 00:15 IST on the 1st of the next month. That's 18:45 UTC on the
 // last day of the current IST month.
+//
+// SPECIAL CASE: July 2026. The July cutoff was extended to Aug 1 23:59
+// IST (see period-lock.js). Consolidation for that cycle needs to run
+// AFTER the cutoff, roughly one hour later: Aug 2 01:00 IST = Aug 1
+// 19:30 UTC. Applies ONLY if we haven't yet run past that instant.
 function nextRunUtcMs(now = new Date()) {
+  // One-shot: July 2026 special run.
+  const jul2026Run = Date.UTC(2026, 7, 1, 19, 30);   // Aug 2 01:00 IST
+  if (now.getTime() < jul2026Run) return jul2026Run;
+
   const nowIst = istParts(now);
   // The 1st of NEXT IST month at 00:15 IST
   const nextMonthYear = nowIst.month === 12 ? nowIst.year + 1 : nowIst.year;
@@ -73,8 +82,10 @@ async function generateForPeriod(period, { generatedBy = 'cron' } = {}) {
 
 // Generate for one specific (employee, period). Skips if no approved
 // submissions found. Called from generateForPeriod and from a manual
-// regenerate endpoint.
-async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cron', employee = null } = {}) {
+// regenerate endpoint. `signoffs` is optional {hr:{by,at},mgmt:{by,at}} —
+// when provided, they're drawn onto the cover page so the approved PDF
+// carries the audit trail.
+async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cron', employee = null, signoffs = null, keepStatus = false } = {}) {
   const submissions = stmts.listApprovedForConsolidation.all(employeeId, period);
   if (!submissions.length) return { skipped: true, reason: 'no-approved-submissions' };
 
@@ -84,8 +95,6 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cr
     return e;
   })();
 
-  // Load attachments per submission — callback keeps this file decoupled
-  // from the db statements module.
   async function loadAttachments(subId) {
     return stmts.listAttachments.all(subId) || [];
   }
@@ -100,6 +109,7 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cr
     submissions,
     loadAttachments,
     outPath,
+    signoffs,
   });
 
   const totalAmount = submissions.reduce((acc, s) => {
@@ -110,16 +120,26 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cr
     return acc + (parseFloat(s.total_amount) || 0);
   }, 0);
 
-  stmts.upsertConsolidatedReport.run({
-    employee_id: emp.id,
-    period,
-    total_amount: +totalAmount.toFixed(2),
-    submission_count: submissions.length,
-    submission_ids: JSON.stringify(submissions.map(s => s.id)),
-    pdf_path: writtenPath,
-    pdf_page_count: pageCount,
-    generated_by: generatedBy,
-  });
+  if (keepStatus) {
+    // In-place re-render (used after HR/Mgmt approval to bake sign-offs
+    // into the PDF without wiping the report's approval status). Only
+    // updates the file path + page count.
+    stmts.updateConsolidatedReportPdf.run({
+      employee_id: emp.id, period,
+      pdf_path: writtenPath, pdf_page_count: pageCount,
+    });
+  } else {
+    stmts.upsertConsolidatedReport.run({
+      employee_id: emp.id,
+      period,
+      total_amount: +totalAmount.toFixed(2),
+      submission_count: submissions.length,
+      submission_ids: JSON.stringify(submissions.map(s => s.id)),
+      pdf_path: writtenPath,
+      pdf_page_count: pageCount,
+      generated_by: generatedBy,
+    });
+  }
 
   return { skipped: false, pdf_path: writtenPath, page_count: pageCount, total_amount: +totalAmount.toFixed(2) };
 }
@@ -162,6 +182,27 @@ function startScheduler() {
       console.log(`[consolidate] auto-run starting for period ${period}`);
       const summary = await generateForPeriod(period, { generatedBy: 'cron' });
       console.log(`[consolidate] auto-run done for ${period}: ${summary.generated} generated`);
+
+      // Fan out HR review emails. Lazy-required to avoid a circular
+      // require between this file and consolidated-approval (which itself
+      // imports generateForEmployeePeriod from us).
+      try {
+        const { notifyHr } = require('./consolidated-approval');
+        let notified = 0, errs = 0;
+        for (const r of (summary.results || [])) {
+          if (!r.ok || r.skipped) continue;
+          try {
+            const cr = stmts.getConsolidatedReportByEmpPeriod.get(r.employee_id, period);
+            if (cr) { await notifyHr(cr.id); notified++; }
+          } catch (e) {
+            errs++;
+            console.error(`[consolidate] notifyHr failed for emp ${r.employee_id}:`, e);
+          }
+        }
+        console.log(`[consolidate] HR notified: ${notified} · errors: ${errs}`);
+      } catch (e) {
+        console.error('[consolidate] HR notification stage failed:', e);
+      }
     } catch (e) {
       console.error('[consolidate] auto-run failed:', e);
     } finally {

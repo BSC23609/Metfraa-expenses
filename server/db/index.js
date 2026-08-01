@@ -269,20 +269,38 @@ db.exec(`
       pdf_page_count     INTEGER,
       generated_at       TEXT NOT NULL DEFAULT (datetime('now')),
       generated_by       TEXT,                          -- 'cron' or admin email if manual
-      -- Turn 2 fields (nullable now)
+      -- Approval + email bookkeeping
+      hr_emailed_at      TEXT,
       hr_approved_by     TEXT,
       hr_approved_at     TEXT,
       hr_rejected_reason TEXT,
+      mgmt_emailed_at    TEXT,
       mgmt_approved_by   TEXT,
       mgmt_approved_at   TEXT,
       mgmt_rejected_reason TEXT,
       accounts_sent_at   TEXT,
+      accounts_email_error TEXT,
       UNIQUE (employee_id, period),
       FOREIGN KEY (employee_id) REFERENCES employees(id)
     );
     CREATE INDEX IF NOT EXISTS idx_consolidated_period ON consolidated_reports(period);
     CREATE INDEX IF NOT EXISTS idx_consolidated_status ON consolidated_reports(status);
   `);
+
+  // Idempotent add-column migration for consolidated_reports — the
+  // Turn 1 CREATE TABLE above evolved during Turn 2 to add
+  // hr_emailed_at / mgmt_emailed_at / accounts_email_error. Existing
+  // deployments will run this to catch up.
+  const consolidatedCols = db.prepare(`PRAGMA table_info(consolidated_reports)`).all().map(c => c.name);
+  const addToConsolidated = (name, ddl) => {
+    if (!consolidatedCols.includes(name)) {
+      try { db.exec(`ALTER TABLE consolidated_reports ADD COLUMN ${ddl}`); }
+      catch (_) { /* concurrent boot — safe to ignore */ }
+    }
+  };
+  addToConsolidated('hr_emailed_at',        'hr_emailed_at TEXT');
+  addToConsolidated('mgmt_emailed_at',      'mgmt_emailed_at TEXT');
+  addToConsolidated('accounts_email_error', 'accounts_email_error TEXT');
 
   // Backfill 'period' for older submissions that were created BEFORE the
   // validators derived a period from travel/cab/misc dates. Walks every
@@ -706,6 +724,67 @@ Object.assign(stmts, {
     WHERE cr.period = ?
     ORDER BY e.name ASC
   `),
+
+  // ---- Consolidated report status transitions (Turn 2) ------------
+  // In-place PDF file swap (used after HR/Mgmt approval so the file
+  // carries the sign-off overlay without wiping approval state).
+  updateConsolidatedReportPdf: db.prepare(`
+    UPDATE consolidated_reports
+    SET pdf_path = @pdf_path, pdf_page_count = @pdf_page_count
+    WHERE employee_id = @employee_id AND period = @period
+  `),
+  // draft → pending_hr (after HR notification email queued)
+  markConsolidatedPendingHr: db.prepare(`
+    UPDATE consolidated_reports
+    SET status = 'pending_hr',
+        hr_emailed_at = COALESCE(hr_emailed_at, datetime('now'))
+    WHERE id = ? AND status IN ('draft','pending_hr')
+  `),
+  // pending_hr → pending_mgmt
+  markConsolidatedHrApproved: db.prepare(`
+    UPDATE consolidated_reports
+    SET status = 'pending_mgmt',
+        hr_approved_by = ?, hr_approved_at = datetime('now'),
+        mgmt_emailed_at = COALESCE(mgmt_emailed_at, datetime('now'))
+    WHERE id = ? AND status = 'pending_hr'
+  `),
+  // pending_mgmt → approved
+  markConsolidatedMgmtApproved: db.prepare(`
+    UPDATE consolidated_reports
+    SET status = 'approved',
+        mgmt_approved_by = ?, mgmt_approved_at = datetime('now'),
+        accounts_sent_at = COALESCE(accounts_sent_at, datetime('now'))
+    WHERE id = ? AND status = 'pending_mgmt'
+  `),
+  // pending_hr / pending_mgmt → rejected
+  markConsolidatedRejected: db.prepare(`
+    UPDATE consolidated_reports
+    SET status = 'rejected',
+        hr_rejected_reason = CASE WHEN @level = 'hr' THEN @reason ELSE hr_rejected_reason END,
+        mgmt_rejected_reason = CASE WHEN @level = 'mgmt' THEN @reason ELSE mgmt_rejected_reason END
+    WHERE id = @id AND status IN ('pending_hr','pending_mgmt')
+  `),
+
+  // Add columns used by Turn 2's email bookkeeping (safe on top of the
+  // Turn 1 schema — they might already be present if the migration was
+  // updated in-place; we ALTER-ADD idempotently in the migration block).
+
+  // Return submissions in a rejected consolidated report to draft, with
+  // deadline_bypass=1 so the employee can resubmit past the cutoff. The
+  // rejection note gets stored in changes_required (existing hub UI
+  // already surfaces it).
+  bypassSubmissionForResubmit: db.prepare(`
+    UPDATE submissions
+    SET status = 'draft',
+        deadline_bypass = 1,
+        changes_required = ?,
+        returned_at = datetime('now')
+    WHERE id = ?
+  `),
+  // Look up submissions in a consolidated report by JSON array of ids
+  // (deserialised at the callsite; SQLite doesn't like binding a JSON
+  // array as a parameter, so callers loop and use this simpler getter).
+  getSubmissionById: db.prepare(`SELECT * FROM submissions WHERE id = ?`),
 });
 
 module.exports = {

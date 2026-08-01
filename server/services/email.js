@@ -317,4 +317,160 @@ async function sendPaymentEmail({ employee, year, month, amount, submissionCount
   return { messageId: info.messageId, recipients: [employee.email] };
 }
 
-module.exports = { sendSubmissionEmail, sendApprovalEmail, sendReturnedEmail, sendPaymentEmail };
+// ============================================================
+// Consolidated report emails (Turn 2)
+// ============================================================
+//   sendConsolidatedForReview  → HR (admin@) or Mgmt (arasu@)
+//   sendConsolidatedToAccounts → accounts@ with admin@ on CC + PDF attached
+//   sendConsolidatedRejected   → employee (uses existing sendReturnedEmail
+//                                pattern; kept as its own function since
+//                                the framing is different and it also
+//                                CC's HR for visibility)
+
+// Recipients for HR / Management review stages. Env vars let ops rewire
+// these without a code change (e.g. staging → dev inbox).
+function hrReviewer()    { return process.env.CONSOLIDATED_HR_EMAIL   || 'admin@metfraa.com'; }
+function mgmtReviewer()  { return process.env.CONSOLIDATED_MGMT_EMAIL || 'arasu@metfraa.com'; }
+function accountsInbox() { return process.env.CONSOLIDATED_ACCOUNTS_EMAIL || 'accounts@metfraa.com'; }
+
+// Review email — sent to HR when a report is generated, sent to Mgmt
+// once HR approves. Frames "please review + approve/reject" with a link
+// to the portal review page (login required).
+async function sendConsolidatedForReview({ report, employee, stage /* 'hr' | 'mgmt' */ }) {
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Metfraa Expense Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+
+  const to = stage === 'hr' ? hrReviewer() : mgmtReviewer();
+  const stageLabel = stage === 'hr' ? 'HR VERIFICATION' : 'MANAGEMENT APPROVAL';
+  const stageMsg   = stage === 'hr'
+    ? 'A new consolidated report is ready for HR verification.'
+    : 'HR has verified this consolidated report. It now needs management approval before it can be sent to accounts.';
+
+  const portalUrl = process.env.APP_URL || '';
+  const reviewUrl = portalUrl ? `${portalUrl}/app.html?admin=consolidated&open=${report.id}` : '';
+
+  const monthName = new Date(report.period + '-01').toLocaleString('en-IN', {
+    month: 'long', year: 'numeric', timeZone: 'UTC',
+  });
+
+  const subject = `[Metfraa · Action needed] ${monthName} · ${employee.name} · ${stageLabel}`;
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #2563eb; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">Metfraa · Expense Portal</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">${stageLabel}</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">${stageMsg}</p>
+
+  <div style="background: #f6f8fa; border-left: 4px solid #2563eb; padding: 18px 22px; margin: 22px 0; border-radius: 3px;">
+    <div style="font-size: 11px; font-family: monospace; letter-spacing: 0.1em; color: #4b5563; text-transform: uppercase; margin-bottom: 6px;">Report</div>
+    <div style="font-size: 16px; color: #0d1421; font-weight: 700;">${employee.name}</div>
+    <div style="font-size: 12px; color: #6b7689; margin-top: 2px;">${employee.email || ''}</div>
+    <table style="width: 100%; margin-top: 14px; font-size: 13px; border-collapse: collapse;">
+      <tr><td style="color:#6b7689;padding:3px 0;">Period</td><td style="text-align:right;font-weight:600;">${monthName}</td></tr>
+      <tr><td style="color:#6b7689;padding:3px 0;">Claims</td><td style="text-align:right;font-weight:600;">${report.submission_count}</td></tr>
+      <tr><td style="color:#6b7689;padding:3px 0;">Total</td><td style="text-align:right;font-weight:700;font-size:15px;">INR ${fmt(report.total_amount)}</td></tr>
+    </table>
+  </div>
+
+  ${reviewUrl ? `
+  <div style="margin: 28px 0; text-align: center;">
+    <a href="${reviewUrl}" style="display: inline-block; background: #2563eb; color: #fff; text-decoration: none; padding: 12px 28px; border-radius: 4px; font-weight: 600; font-size: 14px;">
+      Open in portal to review
+    </a>
+    <div style="font-size: 11px; color: #6b7689; margin-top: 10px;">You'll be asked to sign in with Microsoft before you land on the report.</div>
+  </div>
+  ` : ''}
+
+  <p style="font-size: 12px; color: #6b7689; line-height: 1.6;">
+    You can approve to move the report forward, or reject with a note — rejected reports return each submission to the employee as a draft so they can fix and resubmit (the monthly deadline is bypassed for those specific claims).
+  </p>
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    METFRAA · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to,
+    subject,
+    html,
+  });
+  return { messageId: info.messageId, recipients: [to] };
+}
+
+// Final email to accounts@ with the approved PDF attached + admin@ CCd.
+async function sendConsolidatedToAccounts({ report, employee, pdfPath }) {
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Metfraa Expense Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+
+  const to = accountsInbox();
+  const cc = hrReviewer();
+  const monthName = new Date(report.period + '-01').toLocaleString('en-IN', {
+    month: 'long', year: 'numeric', timeZone: 'UTC',
+  });
+
+  const subject = `[Metfraa] Reimbursement Approved · ${monthName} · ${employee.name} · INR ${fmt(report.total_amount)}`;
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #059669; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">Metfraa · Expense Portal</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">Approved for Payment</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">Please process reimbursement for the following consolidated claim.</p>
+
+  <div style="background: #ecfdf5; border-left: 4px solid #059669; padding: 18px 22px; margin: 22px 0; border-radius: 3px;">
+    <div style="font-size: 11px; font-family: monospace; letter-spacing: 0.1em; color: #065f46; text-transform: uppercase; margin-bottom: 6px;">Payment</div>
+    <div style="font-size: 16px; color: #0d1421; font-weight: 700;">${employee.name}</div>
+    <div style="font-size: 12px; color: #6b7689;">${employee.email || ''}${employee.code ? ' · ' + employee.code : ''}</div>
+    <table style="width: 100%; margin-top: 14px; font-size: 13px; border-collapse: collapse;">
+      <tr><td style="color:#6b7689;padding:3px 0;">Period</td><td style="text-align:right;font-weight:600;">${monthName}</td></tr>
+      <tr><td style="color:#6b7689;padding:3px 0;">Claims</td><td style="text-align:right;font-weight:600;">${report.submission_count}</td></tr>
+      <tr><td style="color:#6b7689;padding:3px 0;">Total to pay</td><td style="text-align:right;font-weight:700;font-size:15px;">INR ${fmt(report.total_amount)}</td></tr>
+    </table>
+  </div>
+
+  <p style="font-size: 13px; color: #6b7689; line-height: 1.6;">
+    The full consolidated report (with all bills + approval sign-offs) is attached. Every claim is clickable from the table of contents on page 2.
+  </p>
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    METFRAA · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const mailOpts = {
+    from: `"${fromName}" <${fromEmail}>`,
+    to, cc, subject, html,
+  };
+  // Attach the signed PDF if available on disk
+  if (pdfPath && require('fs').existsSync(pdfPath)) {
+    const safeName = String(employee.name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_');
+    mailOpts.attachments = [{
+      filename: `${report.period}_${safeName}_consolidated.pdf`,
+      path: pdfPath,
+      contentType: 'application/pdf',
+    }];
+  }
+
+  const info = await getTransporter().sendMail(mailOpts);
+  return { messageId: info.messageId, recipients: [to, cc] };
+}
+
+module.exports = {
+  sendSubmissionEmail, sendApprovalEmail, sendReturnedEmail, sendPaymentEmail,
+  sendConsolidatedForReview, sendConsolidatedToAccounts,
+};

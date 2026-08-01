@@ -141,7 +141,7 @@ function drawHomeLink(page, tocPage, font) {
 // -----------------------------------------------------------------
 // Cover page
 // -----------------------------------------------------------------
-function drawCover({ page, font, fontBold, employee, period, total, submissionCount, generatedAt }) {
+function drawCover({ page, font, fontBold, employee, period, total, submissionCount, generatedAt, signoffs }) {
   const { width, height } = page.getSize();
 
   // Brand strip at top
@@ -151,8 +151,6 @@ function drawCover({ page, font, fontBold, employee, period, total, submissionCo
   page.drawText('CONSOLIDATED REPORT', {
     x: MARGIN, y: height - 90,
     size: 9, font: fontBold, color: MUTED,
-    // pdf-lib doesn't support characterSpacing natively; the label reads
-    // fine at this size without it.
   });
 
   // Big title: month + year
@@ -190,9 +188,36 @@ function drawCover({ page, font, fontBold, employee, period, total, submissionCo
     thickness: 0.5, color: LINE,
   });
 
-  // Status band (Turn 2 will overlay approvals here)
+  // Status band — reflects whichever approvals have been recorded.
+  // signoffs is an optional {hr:{by,at}, mgmt:{by,at}} object.
+  const so = signoffs || {};
   page.drawText('STATUS', { x: MARGIN, y: height - 310, size: 8, font: fontBold, color: MUTED });
-  page.drawText('DRAFT — AWAITING REVIEW', { x: MARGIN, y: height - 328, size: 12, font: fontBold, color: rgb(0.7, 0.4, 0.05) });
+  let statusLabel, statusColor;
+  if (so.mgmt && so.mgmt.by) {
+    statusLabel = 'APPROVED — READY FOR PAYMENT';
+    statusColor = rgb(0.02, 0.5, 0.35);
+  } else if (so.hr && so.hr.by) {
+    statusLabel = 'HR VERIFIED — AWAITING MANAGEMENT';
+    statusColor = rgb(0.145, 0.388, 0.922);
+  } else {
+    statusLabel = 'DRAFT — AWAITING REVIEW';
+    statusColor = rgb(0.7, 0.4, 0.05);
+  }
+  page.drawText(statusLabel, { x: MARGIN, y: height - 328, size: 12, font: fontBold, color: statusColor });
+
+  // Sign-off rows — only draw when the corresponding approval exists.
+  // Stacked vertically below the status. Each row: LABEL · name · datetime IST.
+  let sigY = height - 356;
+  const drawSig = (label, meta) => {
+    if (!meta || !meta.by) return;
+    page.drawText(label, { x: MARGIN, y: sigY, size: 8, font: fontBold, color: MUTED });
+    const nameStr = (meta.by || '').split('@')[0];
+    const dtStr = fmtDateTimeIst(meta.at);
+    page.drawText(`${nameStr}  ·  ${dtStr}`, { x: MARGIN + 90, y: sigY, size: 10, font: fontBold, color: INK });
+    sigY -= 18;
+  };
+  drawSig('HR VERIFIED',      so.hr);
+  drawSig('MGMT APPROVED',    so.mgmt);
 
   // Footer
   page.drawText(`Generated ${fmtDate(generatedAt)}`, {
@@ -201,6 +226,28 @@ function drawCover({ page, font, fontBold, employee, period, total, submissionCo
   page.drawText('METFRAA · EXPENSE PORTAL · CONSOLIDATED', {
     x: MARGIN, y: 28, size: 7, font: fontBold, color: MUTED,
   });
+}
+
+// Format a datetime for the sign-off rows: "02 Aug 2026 01:12 AM IST"
+function fmtDateTimeIst(iso) {
+  if (!iso) return '—';
+  try {
+    // SQLite returns 'YYYY-MM-DD HH:MM:SS' UTC — normalise
+    const parseable = typeof iso === 'string' && iso.length === 19 && iso[10] === ' '
+      ? iso.replace(' ', 'T') + 'Z'
+      : iso;
+    const d = new Date(parseable);
+    if (isNaN(d)) return String(iso);
+    // Convert to IST for display
+    const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+    const datePart = ist.toLocaleDateString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC',
+    });
+    const timePart = ist.toLocaleTimeString('en-IN', {
+      hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC',
+    });
+    return `${datePart} ${timePart} IST`;
+  } catch (_) { return String(iso); }
 }
 
 // -----------------------------------------------------------------
@@ -314,7 +361,7 @@ function drawTocSkeleton({ doc, font, fontBold, employee, period, submissions })
  * @param {string} args.outPath    - where to write the merged PDF
  * @returns {Promise<{ path: string, pageCount: number }>}
  */
-async function buildConsolidatedReport({ employee, period, submissions, loadAttachments, outPath }) {
+async function buildConsolidatedReport({ employee, period, submissions, loadAttachments, outPath, signoffs }) {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -336,6 +383,7 @@ async function buildConsolidatedReport({ employee, period, submissions, loadAtta
     total: totalAmount,
     submissionCount: submissions.length,
     generatedAt,
+    signoffs,
   });
 
   // 2) TOC — draws the rows but leaves link annotations dangling; we bind
