@@ -6,7 +6,12 @@ require('dotenv').config();
 
 const express      = require('express');
 const session      = require('express-session');
-const SQLiteStore  = require('connect-sqlite3')(session);
+// Session store: shares the same better-sqlite3 database handle as the
+// rest of the app (via server/db). Previously used connect-sqlite3, which
+// depends on the callback-based `sqlite3` package that had been dropped
+// as a transitive dep — leading to `this.db.exec is not a function` at
+// startup on Render.
+const BetterSqliteStore = require('better-sqlite3-session-store')(session);
 const passport     = require('passport');
 const path         = require('path');
 const fs           = require('fs');
@@ -27,8 +32,17 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // --- session store --------------------------------------------------
+// Reuses the main better-sqlite3 handle. Sessions live in the same DB
+// file as everything else — one file to backup, one connection to
+// manage. Cleanup runs every 15 min to purge expired sessions.
 app.use(session({
-  store: new SQLiteStore({ db: 'sessions.db', dir: DATA_DIR }),
+  store: new BetterSqliteStore({
+    client: db,
+    expired: {
+      clear: true,
+      intervalMs: 15 * 60 * 1000,
+    },
+  }),
   secret: process.env.SESSION_SECRET || 'dev-only-secret-change-me',
   resave: false,
   saveUninitialized: false,
