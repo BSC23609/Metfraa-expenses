@@ -92,6 +92,10 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'cr
   const emp = employee || (() => {
     const e = stmts.getEmployeeById.get(employeeId);
     if (!e) throw new Error(`Employee ${employeeId} not found`);
+    // getEmployeeById returns the raw column `employee_code`; the PDF
+    // builder reads `.code`. Normalise so both callers see the same
+    // shape.
+    if (e.code == null && e.employee_code != null) e.code = e.employee_code;
     return e;
   })();
 

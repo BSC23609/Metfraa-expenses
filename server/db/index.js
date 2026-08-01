@@ -673,7 +673,7 @@ Object.assign(stmts, {
   `),
   // Employees who have at least one approved/settled submission for a period.
   listEmployeesWithApprovedForPeriod: db.prepare(`
-    SELECT DISTINCT e.id, e.name, e.email, e.code, e.company, e.level
+    SELECT DISTINCT e.id, e.name, e.email, e.employee_code AS code, e.company, e.level
     FROM submissions s
     JOIN employees e ON e.id = s.employee_id
     WHERE s.period = ?
@@ -703,7 +703,7 @@ Object.assign(stmts, {
       accounts_sent_at=NULL
   `),
   getConsolidatedReport: db.prepare(`
-    SELECT cr.*, e.name AS employee_name, e.email AS employee_email, e.code AS employee_code
+    SELECT cr.*, e.name AS employee_name, e.email AS employee_email, e.employee_code AS employee_code
     FROM consolidated_reports cr
     JOIN employees e ON e.id = cr.employee_id
     WHERE cr.id = ?
