@@ -886,6 +886,218 @@ router.post('/payments/unmark', requireAdmin, (req, res) => {
   }
 });
 
+// ---- Period Overrides ---------------------------------------------
+//
+//   Manage exceptions to the "submit by the 2nd of the following month"
+//   rule. An override is (employee_id | NULL, period, expires_at).
+//
+//   GET  /api/admin/period-overrides        → active overrides
+//   GET  /api/admin/period-overrides/all    → last 200 (audit)
+//   POST /api/admin/period-overrides        → grant
+//        body: { employee_id | null, period, days_valid, reason? }
+//   POST /api/admin/period-overrides/:id/revoke  → mark revoked now
+// -------------------------------------------------------------------
+
+router.get('/period-overrides', requireAdmin, (req, res) => {
+  try {
+    const rows = stmts.listActivePeriodOverrides.all();
+    res.json({ overrides: rows });
+  } catch (err) {
+    console.error('[period-overrides list]', err);
+    res.status(500).json({ error: err.message || 'Could not list overrides' });
+  }
+});
+
+router.get('/period-overrides/all', requireAdmin, (req, res) => {
+  try {
+    const rows = stmts.listAllPeriodOverrides.all();
+    res.json({ overrides: rows });
+  } catch (err) {
+    console.error('[period-overrides audit]', err);
+    res.status(500).json({ error: err.message || 'Could not list overrides' });
+  }
+});
+
+router.post('/period-overrides', requireAdmin, (req, res) => {
+  try {
+    const body = req.body || {};
+    const period = (body.period || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: 'period must be YYYY-MM' });
+
+    // employee_id: null → global override. Otherwise must be a real employee.
+    let employeeId = null;
+    if (body.employee_id != null && body.employee_id !== '') {
+      const n = parseInt(body.employee_id, 10);
+      if (!Number.isFinite(n) || n <= 0) return res.status(400).json({ error: 'invalid employee_id' });
+      const emp = stmts.getEmployeeById.get(n);
+      if (!emp) return res.status(400).json({ error: 'employee not found' });
+      employeeId = n;
+    }
+
+    // days_valid: how many days the override lasts. 1–30. Default 7.
+    let daysValid = 7;
+    if (body.days_valid != null && body.days_valid !== '') {
+      const n = parseInt(body.days_valid, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 30) return res.status(400).json({ error: 'days_valid must be 1–30' });
+      daysValid = n;
+    }
+    const expiresAt = new Date(Date.now() + daysValid * 24 * 60 * 60 * 1000)
+      .toISOString().slice(0, 19).replace('T', ' ');
+
+    const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 500) : '';
+
+    const info = stmts.insertPeriodOverride.run({
+      employee_id: employeeId,
+      period,
+      expires_at: expiresAt,
+      granted_by: req.user.email,
+      reason: reason || null,
+    });
+
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'GRANT_PERIOD_OVERRIDE',
+      target_type: 'period_override', target_id: info.lastInsertRowid,
+      meta_json: JSON.stringify({ period, employee_id: employeeId, days_valid: daysValid, expires_at: expiresAt, reason }),
+      ip_address: req.ip,
+    });
+
+    res.json({ ok: true, id: info.lastInsertRowid, expires_at: expiresAt });
+  } catch (err) {
+    console.error('[period-overrides grant]', err);
+    res.status(500).json({ error: err.message || 'Could not grant override' });
+  }
+});
+
+router.post('/period-overrides/:id/revoke', requireAdmin, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'invalid id' });
+    const r = stmts.revokePeriodOverride.run(req.user.email, id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Override not found or already revoked.' });
+
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'REVOKE_PERIOD_OVERRIDE',
+      target_type: 'period_override', target_id: id,
+      meta_json: JSON.stringify({}),
+      ip_address: req.ip,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[period-overrides revoke]', err);
+    res.status(500).json({ error: err.message || 'Could not revoke' });
+  }
+});
+
+// ---- Consolidated Reports ------------------------------------------
+//
+//   GET  /api/admin/consolidated                       — all rows, most recent first
+//   GET  /api/admin/consolidated?period=YYYY-MM        — filtered by month
+//   GET  /api/admin/consolidated/:id                   — one row + meta
+//   GET  /api/admin/consolidated/:id/pdf               — stream the PDF
+//   POST /api/admin/consolidated/generate              — {period, employee_id?}
+//        manually generate for the given period (or one employee only)
+//   POST /api/admin/consolidated/regenerate-previous   — convenience: run
+//        the same job the cron would run tonight (previous IST month)
+//
+//   Turn 2 will add: /:id/approve-hr, /:id/approve-mgmt, /:id/reject
+// -------------------------------------------------------------------
+
+router.get('/consolidated', requireAdmin, (req, res) => {
+  try {
+    const period = (req.query.period || '').trim();
+    const rows = period
+      ? stmts.listConsolidatedReportsForPeriod.all(period)
+      : stmts.listConsolidatedReports.all();
+    res.json({ reports: rows });
+  } catch (err) {
+    console.error('[consolidated list]', err);
+    res.status(500).json({ error: err.message || 'Could not list reports' });
+  }
+});
+
+router.get('/consolidated/:id', requireAdmin, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const r = stmts.getConsolidatedReport.get(id);
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    res.json({ report: r });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Fetch failed' });
+  }
+});
+
+router.get('/consolidated/:id/pdf', requireAdmin, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const r = stmts.getConsolidatedReport.get(id);
+    if (!r) return res.status(404).send('Not found');
+    if (!r.pdf_path || !require('fs').existsSync(r.pdf_path)) {
+      return res.status(404).send('PDF file missing on disk. Regenerate the report.');
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="consolidated-${r.period}-${(r.employee_name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_')}.pdf"`);
+    require('fs').createReadStream(r.pdf_path).pipe(res);
+  } catch (err) {
+    res.status(500).send(err.message || 'PDF stream failed');
+  }
+});
+
+router.post('/consolidated/generate', requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const period = (body.period || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(period)) return res.status(400).json({ error: 'period must be YYYY-MM' });
+
+    const { generateForPeriod, generateForEmployeePeriod } = require('../services/consolidate-scheduler');
+
+    if (body.employee_id != null && body.employee_id !== '') {
+      const empId = parseInt(body.employee_id, 10);
+      if (!Number.isFinite(empId) || empId <= 0) return res.status(400).json({ error: 'invalid employee_id' });
+      const result = await generateForEmployeePeriod(empId, period, { generatedBy: req.user.email });
+
+      stmts.insertAudit.run({
+        actor_email: req.user.email, action: 'GENERATE_CONSOLIDATED',
+        target_type: 'consolidated_report', target_id: 0,
+        meta_json: JSON.stringify({ period, employee_id: empId, result }),
+        ip_address: req.ip,
+      });
+
+      return res.json({ ok: true, ...result });
+    }
+
+    const summary = await generateForPeriod(period, { generatedBy: req.user.email });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'GENERATE_CONSOLIDATED_BATCH',
+      target_type: 'consolidated_report', target_id: 0,
+      meta_json: JSON.stringify({ period, generated: summary.generated }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true, ...summary });
+  } catch (err) {
+    console.error('[consolidated generate]', err);
+    res.status(500).json({ error: err.message || 'Generation failed' });
+  }
+});
+
+router.post('/consolidated/regenerate-previous', requireAdmin, async (req, res) => {
+  try {
+    const { generateForPeriod, previousMonthPeriod } = require('../services/consolidate-scheduler');
+    const period = previousMonthPeriod();
+    const summary = await generateForPeriod(period, { generatedBy: req.user.email });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'GENERATE_CONSOLIDATED_BATCH',
+      target_type: 'consolidated_report', target_id: 0,
+      meta_json: JSON.stringify({ period, generated: summary.generated, trigger: 'regen-previous' }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true, ...summary });
+  } catch (err) {
+    console.error('[consolidated regen-previous]', err);
+    res.status(500).json({ error: err.message || 'Regen failed' });
+  }
+});
+
 // ---- Audit log -----------------------------------------------------
 router.get('/audit', requireAdmin, (req, res) => {
   res.json({ audit: db.prepare(`SELECT * FROM audit_log ORDER BY id DESC LIMIT 500`).all() });

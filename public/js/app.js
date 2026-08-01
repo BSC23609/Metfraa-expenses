@@ -1261,6 +1261,22 @@
     refreshUploadList();
     updateSummary();
 
+    // Period-lock banner. Inserted directly below the draft-banner (or at
+    // the top if no draft banner) and refreshed both immediately and on
+    // any change to a month-picker in the form. The banner surfaces the
+    // "your period is locked" warning early so the employee doesn't hit
+    // Submit only to be blocked.
+    ensurePeriodLockBanner(body);
+    refreshPeriodLockBanner();
+    // Watch every <input type="month"> in the form — a change triggers a
+    // fresh status check. Using event delegation so we don't rebind per
+    // re-render.
+    body.addEventListener('input', (e) => {
+      if (e.target && e.target.tagName === 'INPUT' && e.target.type === 'month') {
+        refreshPeriodLockBanner();
+      }
+    });
+
     // Bind submit/preview
     $('#previewBtn').onclick = () => { if (validateForm()) route('preview'); };
     $('#submitBtn').onclick  = () => submitForm();
@@ -2146,6 +2162,75 @@
   // ===================================================================
   //  FIELD HELPERS
   // ===================================================================
+  // ---- Period-lock banner ------------------------------------------
+  //
+  // Shows a warning on the form when the currently-typed period is past
+  // the "2nd of next month" deadline. If the employee has an override
+  // that unlocks it for them, we show a green info bubble instead.
+  //
+  // The banner element lives in a persistent slot so it can be updated
+  // in place; the check is debounced to avoid a burst of requests as
+  // the user drags across the month-picker calendar.
+  let _periodLockDebounce = null;
+
+  function ensurePeriodLockBanner(body) {
+    if ($('#periodLockBanner')) return;
+    const slot = el('div', { id: 'periodLockBanner', style: 'display:none;' });
+    body.insertBefore(slot, body.firstChild);
+  }
+
+  function refreshPeriodLockBanner() {
+    if (_periodLockDebounce) clearTimeout(_periodLockDebounce);
+    _periodLockDebounce = setTimeout(_doRefreshPeriodLockBanner, 200);
+  }
+
+  async function _doRefreshPeriodLockBanner() {
+    const slot = $('#periodLockBanner');
+    if (!slot) return;
+    // For DTR the period lives on state.formData.period. For every other
+    // form same thing. Advance / Cab / Misc: we don't have an explicit
+    // period field but the server derives one from payload dates — we
+    // don't preview that here (it'd double the work). Just skip if the
+    // form doesn't collect a period explicitly.
+    const p = state.formData && state.formData.period;
+    if (!p || !/^\d{4}-\d{2}$/.test(p)) {
+      slot.style.display = 'none';
+      slot.innerHTML = '';
+      return;
+    }
+    try {
+      const res = await api('/api/submissions/period-lock/status?period=' + encodeURIComponent(p));
+      slot.innerHTML = '';
+      // Three states: allowed & no calendar lock (silent), allowed via
+      // override (green info), locked (red warning).
+      if (!res.calendar_locked) {
+        slot.style.display = 'none';
+        return;
+      }
+      if (res.allowed && res.via_override) {
+        slot.style.display = '';
+        slot.className = 'period-lock-banner via-override';
+        slot.appendChild(el('div', { class: 'plb-label' }, 'Override active'));
+        slot.appendChild(el('div', { class: 'plb-msg' },
+          `${p} is normally locked (deadline was ${res.deadline}), but HR has granted an override for you. You can still submit.`
+        ));
+        return;
+      }
+      // Locked & no override
+      slot.style.display = '';
+      slot.className = 'period-lock-banner locked';
+      slot.appendChild(el('div', { class: 'plb-label' }, 'This month is closed'));
+      slot.appendChild(el('div', { class: 'plb-msg' },
+        `The deadline to submit ${p} expenses was ${res.deadline}. Please contact HR to request a temporary override.`
+      ));
+    } catch (err) {
+      // Non-fatal — hide the banner rather than block the form
+      console.error('[period-lock]', err);
+      slot.style.display = 'none';
+    }
+  }
+
+
   function field(id, label, type, value, required, onchange, placeholder = '') {
     return el('div', { class: 'field' },
       el('label', { for: id }, label, required ? el('span', { class: 'req' }, '*') : null),
@@ -2937,7 +3022,8 @@
     $$('.admin-tabpane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
     if (tab === 'projects') loadProjectsAdmin().then(drawProjectTable);
     if (tab === 'dashboard') loadDashboard();
-    if (tab === 'payments') loadPayments();
+    if (tab === 'consolidated') loadConsolidated();
+    if (tab === 'overrides') loadOverrides();
   }
 
   // ---- Pending approvals --------------------------------------------
@@ -3829,6 +3915,309 @@
     } finally { hideLoading(); }
   }
 
+  // ---- Period Overrides (admin) -------------------------------------
+  //   HR-granted exceptions to the "submit by the 2nd" rule. This tab
+  //   lists all ACTIVE overrides (per-employee + global) with revoke
+  //   buttons, and offers a modal to grant new ones with a validity
+  //   window in days.
+  async function loadOverrides() {
+    const tbody = $('#ovrTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--bsg-muted);padding:24px;">Loading…</td></tr>';
+    try {
+      const data = await api('/api/admin/period-overrides');
+      state.overrides = data.overrides || [];
+      drawOverridesTable();
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--bsg-danger);padding:24px;">${err.message || 'Failed to load'}</td></tr>`;
+    }
+  }
+
+  function drawOverridesTable() {
+    const tbody = $('#ovrTableBody');
+    if (!tbody) return;
+    const rows = state.overrides || [];
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      tbody.appendChild(el('tr', {}, el('td', {
+        colspan: 6, style: 'text-align:center;color:var(--bsg-muted);padding:32px;'
+      }, 'No active overrides. Grant one when someone needs to submit expenses past the deadline.')));
+      $('#ovrCount').textContent = '0 active';
+      return;
+    }
+    for (const o of rows) {
+      const scope = o.employee_id == null
+        ? el('span', { style: 'font-weight:600;color:#d97706;' }, 'GLOBAL')
+        : el('div', {},
+            el('div', { style: 'font-weight:600;' }, o.employee_name || `#${o.employee_id}`),
+            o.employee_email ? el('div', { style: 'font-family:monospace;font-size:11px;color:var(--bsg-muted);' }, o.employee_email) : null,
+          );
+      const expiresLine = formatOverrideExpiry(o.expires_at);
+      tbody.appendChild(el('tr', {},
+        el('td', {}, scope),
+        el('td', {}, el('strong', {}, o.period)),
+        el('td', { style: 'font-size:12px;' }, expiresLine),
+        el('td', { style: 'font-size:12px;color:var(--bsg-muted);' }, (o.granted_by || '').split('@')[0]),
+        el('td', { style: 'font-size:12px;color:var(--bsg-muted);max-width:220px;' }, o.reason || '—'),
+        el('td', { style: 'text-align:right;' },
+          el('button', {
+            class: 'reject',
+            onclick: () => revokeOverride(o),
+          }, 'Revoke'),
+        )
+      ));
+    }
+    $('#ovrCount').textContent = `${rows.length} active`;
+  }
+
+  function formatOverrideExpiry(iso) {
+    if (!iso) return '—';
+    // SQLite returns 'YYYY-MM-DD HH:MM:SS' as UTC — normalise for parsing
+    const parseable = iso.length === 19 && iso[10] === ' ' ? iso.replace(' ', 'T') + 'Z' : iso;
+    const d = new Date(parseable);
+    if (isNaN(d)) return iso;
+    const daysLeft = Math.max(0, Math.ceil((d.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+    const dateStr = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    return `${dateStr} · ${daysLeft} day${daysLeft === 1 ? '' : 's'} left`;
+  }
+
+  function openOvrModal() {
+    // Reset the modal to defaults every time it opens so stale values
+    // from a previous grant don't leak into the next one.
+    $('#ovrScope').value = 'employee';
+    $('#ovrPeriod').value = '';
+    $('#ovrDays').value = '7';
+    $('#ovrReason').value = '';
+    // Populate employee dropdown. Prefer the admin's cached employee
+    // list if already loaded (Employees tab), otherwise fetch fresh.
+    populateOvrEmployeeSelect();
+    $('#ovrEmployeeField').style.display = '';
+    $('#ovrModalBackdrop').classList.add('show');
+  }
+
+  async function populateOvrEmployeeSelect() {
+    const sel = $('#ovrEmployee');
+    if (!sel) return;
+    let emps = state.employees;
+    if (!Array.isArray(emps) || !emps.length) {
+      try {
+        const data = await api('/api/admin/employees');
+        emps = data.employees || [];
+        state.employees = emps;
+      } catch (_) { emps = []; }
+    }
+    // Only show active employees — inactive ones can't submit anyway
+    const active = emps.filter(e => e.is_active !== 0 && e.is_active !== false);
+    sel.innerHTML = '<option value="">— Select —</option>'
+      + active.map(e => `<option value="${e.id}">${e.name} · ${e.email}</option>`).join('');
+  }
+
+  async function saveOverride() {
+    const scope = $('#ovrScope').value;
+    const period = $('#ovrPeriod').value;
+    const days = parseInt($('#ovrDays').value, 10);
+    const reason = $('#ovrReason').value.trim();
+
+    if (!period || !/^\d{4}-\d{2}$/.test(period)) {
+      toast('Pick a period (month).', 'error');
+      return;
+    }
+    if (!Number.isFinite(days) || days < 1 || days > 30) {
+      toast('Valid for must be between 1 and 30 days.', 'error');
+      return;
+    }
+    let employeeId = null;
+    if (scope === 'employee') {
+      const raw = $('#ovrEmployee').value;
+      if (!raw) { toast('Pick an employee (or switch scope to Global).', 'error'); return; }
+      employeeId = parseInt(raw, 10);
+    }
+
+    showLoading('Granting override…');
+    try {
+      await api('/api/admin/period-overrides', {
+        method: 'POST',
+        body: JSON.stringify({
+          employee_id: employeeId,
+          period,
+          days_valid: days,
+          reason,
+        }),
+      });
+      toast('Override granted', 'success');
+      $('#ovrModalBackdrop').classList.remove('show');
+      await loadOverrides();
+    } catch (err) {
+      toast(err.message || 'Grant failed', 'error');
+    } finally {
+      hideLoading();
+    }
+  }
+
+  async function revokeOverride(o) {
+    const scopeLabel = o.employee_id == null ? 'the GLOBAL override' : `${o.employee_name || 'this employee'}'s override`;
+    const ok = await confirmModal({
+      title: 'Revoke override?',
+      body: `Revoke ${scopeLabel} for ${o.period}? Anyone relying on it won't be able to submit until you grant a new one.`,
+      confirmText: 'Revoke',
+    });
+    if (!ok) return;
+    showLoading('Revoking…');
+    try {
+      await api(`/api/admin/period-overrides/${o.id}/revoke`, { method: 'POST' });
+      toast('Revoked', 'success');
+      await loadOverrides();
+    } catch (err) {
+      toast(err.message || 'Revoke failed', 'error');
+    } finally {
+      hideLoading();
+    }
+  }
+
+  // ---- Consolidated Reports (admin) ---------------------------------
+  //   Lists auto-generated monthly reports per employee, with links to
+  //   view the PDF and a manual "generate" button for on-demand runs.
+  async function loadConsolidated() {
+    const tbody = $('#conTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--bsg-muted);padding:24px;">Loading…</td></tr>';
+    try {
+      const period = ($('#conMonth').value || '').trim();
+      const url = period ? `/api/admin/consolidated?period=${encodeURIComponent(period)}` : '/api/admin/consolidated';
+      const data = await api(url);
+      state.consolidatedReports = data.reports || [];
+      drawConsolidatedTable();
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--bsg-danger);padding:24px;">${err.message || 'Failed to load'}</td></tr>`;
+    }
+  }
+
+  function drawConsolidatedTable() {
+    const tbody = $('#conTableBody');
+    if (!tbody) return;
+    const rows = state.consolidatedReports || [];
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      const filtered = ($('#conMonth').value || '').trim();
+      tbody.appendChild(el('tr', {}, el('td', {
+        colspan: 8, style: 'text-align:center;color:var(--bsg-muted);padding:32px;'
+      }, filtered
+          ? `No consolidated reports for ${filtered} yet. Use "Generate for month…" to create them.`
+          : 'No consolidated reports generated yet.')));
+      $('#conCount').textContent = '';
+      return;
+    }
+    // Group visually by period — SQL sorts by period DESC already, so we
+    // just add a subtle top-border on the first row of each new period.
+    let lastPeriod = null;
+    for (const r of rows) {
+      const isFirstOfPeriod = r.period !== lastPeriod;
+      lastPeriod = r.period;
+      tbody.appendChild(el('tr', { style: isFirstOfPeriod ? 'border-top:2px solid var(--bsg-line);' : '' },
+        el('td', {}, isFirstOfPeriod
+          ? el('strong', {}, r.period)
+          : el('span', { style: 'color:var(--bsg-muted);' }, r.period)),
+        el('td', {},
+          el('div', { style: 'font-weight:600;' }, r.employee_name),
+          el('div', { style: 'font-family:monospace;font-size:11px;color:var(--bsg-muted);' }, r.employee_email),
+        ),
+        el('td', { class: 'num', style: 'text-align:right;font-weight:600;' }, 'INR ' + fmt(r.total_amount)),
+        el('td', {}, String(r.submission_count)),
+        el('td', {}, r.pdf_page_count ? String(r.pdf_page_count) + ' pp' : '—'),
+        el('td', { style: 'font-size:12px;color:var(--bsg-muted);' },
+          formatGeneratedLine(r.generated_at, r.generated_by)),
+        el('td', {}, el('span', { class: 'status-pill ' + statusPillClass(r.status) }, r.status)),
+        el('td', { style: 'text-align:right;' },
+          el('div', { class: 'admin-actions' },
+            el('a', { class: 'view', href: `/api/admin/consolidated/${r.id}/pdf`, target: '_blank' }, 'Open PDF'),
+            el('button', { class: 'approve', onclick: () => regenerateOne(r) }, 'Regenerate'),
+          )),
+      ));
+    }
+    const monthFilter = ($('#conMonth').value || '').trim();
+    $('#conCount').textContent = monthFilter
+      ? `${rows.length} report${rows.length === 1 ? '' : 's'} for ${monthFilter}`
+      : `${rows.length} report${rows.length === 1 ? '' : 's'} total`;
+  }
+
+  function statusPillClass(status) {
+    // Reuse existing pill classes where they match; fall back to a neutral color
+    switch (status) {
+      case 'approved':     return 'approved';
+      case 'draft':        return 'draft';
+      case 'rejected':     return 'rejected';
+      case 'pending_hr':   return 'pending';
+      case 'pending_mgmt': return 'pending';
+      default:             return 'pending';
+    }
+  }
+
+  function formatGeneratedLine(iso, by) {
+    if (!iso) return '—';
+    try {
+      const parseable = iso.length === 19 && iso[10] === ' ' ? iso.replace(' ', 'T') + 'Z' : iso;
+      const d = new Date(parseable);
+      if (isNaN(d)) return iso;
+      const dateStr = d.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+      const byLabel = by === 'cron' ? 'auto' : (by ? by.split('@')[0] : '');
+      return `${dateStr}${byLabel ? ' · ' + byLabel : ''}`;
+    } catch (_) { return iso; }
+  }
+
+  async function regenerateOne(r) {
+    const ok = await confirmModal({
+      title: 'Regenerate consolidated report?',
+      body: `Rebuild the PDF for ${r.employee_name} · ${r.period}? This will pick up any newly-approved submissions and reset any Turn 2 approval state on this report.`,
+      confirmText: 'Regenerate',
+    });
+    if (!ok) return;
+    showLoading('Regenerating…');
+    try {
+      const res = await api('/api/admin/consolidated/generate', {
+        method: 'POST',
+        body: JSON.stringify({ period: r.period, employee_id: r.employee_id }),
+      });
+      if (res.skipped) toast('No approved submissions for this employee/month.', 'info');
+      else toast('Report regenerated', 'success');
+      await loadConsolidated();
+    } catch (err) {
+      toast(err.message || 'Regeneration failed', 'error');
+    } finally {
+      hideLoading();
+    }
+  }
+
+  async function generateForMonth() {
+    // Prompt HR for the target month
+    const period = window.prompt('Generate consolidated reports for which month? (YYYY-MM)', $('#conMonth').value || '');
+    if (!period) return;
+    if (!/^\d{4}-\d{2}$/.test(period)) {
+      toast('Enter a month as YYYY-MM (e.g. 2026-07).', 'error');
+      return;
+    }
+    const ok = await confirmModal({
+      title: 'Generate consolidated reports?',
+      body: `This will build (or rebuild) one PDF per employee who has approved submissions for ${period}. Any existing consolidated reports for that month will be replaced. Continue?`,
+      confirmText: 'Generate',
+    });
+    if (!ok) return;
+    showLoading('Generating reports for ' + period + '…');
+    try {
+      const res = await api('/api/admin/consolidated/generate', {
+        method: 'POST',
+        body: JSON.stringify({ period }),
+      });
+      toast(`${res.generated} report${res.generated === 1 ? '' : 's'} generated`, 'success');
+      // Focus the filter on the generated month so the user sees the results
+      $('#conMonth').value = period;
+      await loadConsolidated();
+    } catch (err) {
+      toast(err.message || 'Generation failed', 'error');
+    } finally {
+      hideLoading();
+    }
+  }
+
   // ---- Dashboard (admin) --------------------------------------------
   //   Fetches aggregated spend from /api/admin/dashboard and renders
   //   summary tiles + three Chart.js charts. Charts are recreated on each
@@ -4098,6 +4487,23 @@
   $('#payDetailClose')&& $('#payDetailClose').addEventListener('click', () => { $('#payDetailBackdrop').classList.remove('show'); paySelectedEmp = null; });
   $('#payDetailMark') && $('#payDetailMark').addEventListener('click', confirmMarkPaid);
   $('#payDetailBackdrop') && $('#payDetailBackdrop').addEventListener('click', (e) => { if (e.target.id === 'payDetailBackdrop') { $('#payDetailBackdrop').classList.remove('show'); paySelectedEmp = null; } });
+
+  // Overrides tab
+  $('#ovrGrantBtn') && $('#ovrGrantBtn').addEventListener('click', openOvrModal);
+  $('#ovrCancel')   && $('#ovrCancel').addEventListener('click', () => $('#ovrModalBackdrop').classList.remove('show'));
+  $('#ovrSave')     && $('#ovrSave').addEventListener('click', saveOverride);
+  $('#ovrScope')    && $('#ovrScope').addEventListener('change', (e) => {
+    // Global overrides don't need an employee — hide that field
+    $('#ovrEmployeeField').style.display = e.target.value === 'global' ? 'none' : '';
+  });
+  $('#ovrModalBackdrop') && $('#ovrModalBackdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'ovrModalBackdrop') $('#ovrModalBackdrop').classList.remove('show');
+  });
+
+  // Consolidated Reports tab
+  $('#conMonth')       && $('#conMonth').addEventListener('change', loadConsolidated);
+  $('#conRefreshBtn')  && $('#conRefreshBtn').addEventListener('click', loadConsolidated);
+  $('#conGenerateBtn') && $('#conGenerateBtn').addEventListener('click', generateForMonth);
 
   boot();
 })();

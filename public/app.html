@@ -308,7 +308,8 @@
       <button class="admin-tab" data-tab="submissions">All Submissions</button>
       <button class="admin-tab" data-tab="employees">Employees</button>
       <button class="admin-tab" data-tab="projects">Projects</button>
-      <button class="admin-tab" data-tab="payments">Payments</button>
+      <button class="admin-tab" data-tab="consolidated">Consolidated Reports</button>
+      <button class="admin-tab" data-tab="overrides">Overrides</button>
     </div>
 
     <!-- TAB: Dashboard -->
@@ -450,28 +451,68 @@
       </div>
     </div>
 
-    <!-- TAB: Payments -->
-    <div class="admin-tabpane" id="tab-payments">
+    <!-- TAB: Consolidated Reports -->
+    <div class="admin-tabpane" id="tab-consolidated">
       <div class="admin-toolbar">
-        <label for="payMonth" style="font-size:11px;font-family:'JetBrains Mono',monospace;letter-spacing:0.05em;color:var(--bsg-muted);text-transform:uppercase;font-weight:600;">Month</label>
-        <input type="month" id="payMonth" class="admin-search" style="flex:0 0 180px;" />
-        <span class="admin-count" id="payCount"></span>
-        <button class="btn btn-ghost" id="payRefreshBtn" style="margin-left:auto;">Refresh</button>
+        <label for="conMonth" style="font-size:11px;font-family:'JetBrains Mono',monospace;letter-spacing:0.05em;color:var(--bsg-muted);text-transform:uppercase;font-weight:600;">Filter month</label>
+        <input type="month" id="conMonth" class="admin-search" style="flex:0 0 180px;" />
+        <span class="admin-count" id="conCount"></span>
+        <div style="margin-left:auto;display:flex;gap:8px;">
+          <button class="btn btn-ghost" id="conRefreshBtn">Refresh</button>
+          <button class="btn btn-submit" id="conGenerateBtn">Generate for month…</button>
+        </div>
+      </div>
+      <div class="card" style="padding:16px 20px;margin-bottom:14px;background:#f6f8fa;">
+        <div style="font-size:12px;color:var(--bsg-muted);line-height:1.6;">
+          <strong>Consolidated reports</strong> bundle every approved &amp; settled claim for a month into one navigable PDF per employee — click the "&gt;" on any TOC row to jump to that submission, click the "HOME" pill on any page to jump back. <strong>Automatic generation</strong> runs at 00:15 IST on the 1st of each month for the previous month. Use "Generate for month…" below to run it early or catch-up. Turn 2 will add HR/Management approval flow + email dispatch.
+        </div>
       </div>
       <div class="card" style="padding:0;overflow:hidden;">
         <div style="overflow-x:auto;">
-          <table class="admin-table" id="payTable">
+          <table class="admin-table" id="conTable">
             <thead>
               <tr>
+                <th>Period</th>
                 <th>Employee</th>
-                <th style="text-align:right;">Total Payable</th>
+                <th style="text-align:right;">Total</th>
                 <th>Claims</th>
+                <th>Pages</th>
+                <th>Generated</th>
                 <th>Status</th>
-                <th>Paid On</th>
                 <th style="text-align:right;">Actions</th>
               </tr>
             </thead>
-            <tbody id="payTableBody"></tbody>
+            <tbody id="conTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: Period Overrides -->
+    <div class="admin-tabpane" id="tab-overrides">
+      <div class="admin-toolbar">
+        <span class="admin-count" id="ovrCount"></span>
+        <button class="btn btn-submit" id="ovrGrantBtn" style="margin-left:auto;">+ Grant Override</button>
+      </div>
+      <div class="card" style="padding:16px 20px;margin-bottom:14px;background:#f6f8fa;">
+        <div style="font-size:12px;color:var(--bsg-muted);line-height:1.6;">
+          <strong>Deadline rule:</strong> submissions for a month must be filed by the <strong>2nd of the following month</strong>. Past that, the period is locked and employees can't submit unless you grant an override here. Overrides can target a single employee for a specific month, or apply to everyone (global). They expire automatically after the number of days you pick.
+        </div>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="overflow-x:auto;">
+          <table class="admin-table" id="ovrTable">
+            <thead>
+              <tr>
+                <th>Scope</th>
+                <th>Period</th>
+                <th>Expires</th>
+                <th>Granted By</th>
+                <th>Reason</th>
+                <th style="text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="ovrTableBody"></tbody>
           </table>
         </div>
       </div>
@@ -480,6 +521,42 @@
 </section>
 
 </div><!-- /app -->
+
+<!-- ============== OVERRIDE GRANT MODAL ============== -->
+<div class="modal-backdrop" id="ovrModalBackdrop">
+  <div class="modal" id="ovrModal" style="max-width:500px;">
+    <h3>Grant Period Override</h3>
+    <div class="field-grid" style="margin-top:8px;">
+      <div class="field full">
+        <label>Scope <span class="req">*</span></label>
+        <select id="ovrScope">
+          <option value="employee">One employee</option>
+          <option value="global">Everyone (global)</option>
+        </select>
+      </div>
+      <div class="field full" id="ovrEmployeeField">
+        <label>Employee <span class="req">*</span></label>
+        <select id="ovrEmployee"><option value="">— Select —</option></select>
+      </div>
+      <div class="field">
+        <label>Period <span class="req">*</span></label>
+        <input type="month" id="ovrPeriod" />
+      </div>
+      <div class="field">
+        <label>Valid for (days) <span class="req">*</span></label>
+        <input type="number" id="ovrDays" value="7" min="1" max="30" />
+      </div>
+      <div class="field full">
+        <label>Reason (optional)</label>
+        <input type="text" id="ovrReason" maxlength="500" placeholder="e.g. Employee was on leave" />
+      </div>
+    </div>
+    <div class="actions" style="margin-top:16px;">
+      <button class="btn btn-ghost" id="ovrCancel">Cancel</button>
+      <button class="btn btn-submit" id="ovrSave">Grant</button>
+    </div>
+  </div>
+</div>
 
 <!-- ============== PROJECT ADD/EDIT MODAL ============== -->
 <div class="modal-backdrop" id="projModalBackdrop">
@@ -585,24 +662,6 @@
     <div class="actions">
       <button class="btn btn-ghost" id="viewClose">Close</button>
       <button class="btn btn-submit" id="viewDownload">Download PDF</button>
-    </div>
-  </div>
-</div>
-
-<!-- ============== PAYMENT DETAIL MODAL ============== -->
-<div class="modal-backdrop" id="payDetailBackdrop">
-  <div class="modal modal-wide" id="payDetailModal">
-    <div class="view-modal-head">
-      <div>
-        <div class="view-modal-ref" id="payDetailEmp">—</div>
-        <h3 id="payDetailMonth" style="margin:2px 0 0;">Month</h3>
-      </div>
-      <span class="status-pill" id="payDetailStatusPill">—</span>
-    </div>
-    <div class="view-modal-body" id="payDetailBody"></div>
-    <div class="actions">
-      <button class="btn btn-ghost" id="payDetailClose">Close</button>
-      <button class="btn btn-submit" id="payDetailMark">Mark as Paid &amp; Send Email</button>
     </div>
   </div>
 </div>

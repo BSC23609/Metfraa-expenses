@@ -176,6 +176,7 @@ db.exec(`
   // Categorization columns for the dashboard (purpose + project link).
   add('purpose_category',        `purpose_category TEXT`);   // 'project_visit' | 'site_visit' | 'sales_visit' | 'metfraa_office' | 'metfraa_factory' | 'purchase_visit' | 'other'
   add('purpose_other_reason',    `purpose_other_reason TEXT`); // free-text when purpose='other'
+  add('deadline_bypass',         `deadline_bypass INTEGER DEFAULT 0`); // 1 = period lock waived for this row (set by consolidated-report rejection, Turn 2)
   add('project_id',              `project_id INTEGER`);      // FK to projects.id, nullable for Sales Visits with no project
   add('client_name',             `client_name TEXT`);        // free-text alternative when no project (sales prospect)
   // Normalise any legacy 'submitted' status to 'pending'
@@ -214,6 +215,73 @@ db.exec(`
     );
     CREATE INDEX IF NOT EXISTS idx_monthly_payments_employee ON monthly_payments(employee_id);
     CREATE INDEX IF NOT EXISTS idx_monthly_payments_period   ON monthly_payments(year, month);
+  `);
+
+  // Period overrides — HR-granted exceptions to the monthly submission
+  // deadline. Every submission's period must satisfy the "2nd of the
+  // following month" cutoff UNLESS a matching override exists.
+  //
+  // An override matches when: (period == submission's period) AND
+  // (employee_id == submitter's id OR employee_id IS NULL for global) AND
+  // (expires_at > now).
+  //
+  // Rows are never deleted for audit — revoke sets expires_at into the past.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS period_overrides (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id   INTEGER,                          -- NULL = global (applies to everyone)
+      period        TEXT NOT NULL,                    -- 'YYYY-MM'
+      expires_at    TEXT NOT NULL,                    -- ISO string; row is inactive once now() >= this
+      granted_by    TEXT NOT NULL,                    -- admin email
+      granted_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      revoked_at    TEXT,                             -- set when HR revokes early
+      revoked_by    TEXT,
+      reason        TEXT,
+      FOREIGN KEY (employee_id) REFERENCES employees(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_period_overrides_lookup ON period_overrides(period, employee_id, expires_at);
+  `);
+
+  // Consolidated monthly reports — one row per (employee, period).
+  // Generated automatically at 00:15 IST on the 1st of each month for the
+  // month that just ended. Each row aggregates the employee's APPROVED
+  // submissions into a single navigable PDF (TOC + bill attachments +
+  // internal navigation links). The approval chain (HR → Mgmt) lives in
+  // Turn 2 — for now every generated row starts in status 'draft'.
+  //
+  //   status flow (Turn 2):
+  //     draft         → generated, no email yet
+  //     pending_hr    → emailed to admin@ for review
+  //     pending_mgmt  → HR approved, emailed to arasu@
+  //     approved      → both approved, sent to accounts@
+  //     rejected      → HR or Mgmt rejected; underlying submissions
+  //                     returned to employee as draft with deadline_bypass=1
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS consolidated_reports (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id        INTEGER NOT NULL,
+      period             TEXT NOT NULL,                -- 'YYYY-MM'
+      status             TEXT NOT NULL DEFAULT 'draft', -- see above
+      total_amount       REAL NOT NULL DEFAULT 0,
+      submission_count   INTEGER NOT NULL DEFAULT 0,
+      submission_ids     TEXT,                          -- JSON array of ids included in the report
+      pdf_path           TEXT,                          -- absolute path on disk
+      pdf_page_count     INTEGER,
+      generated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      generated_by       TEXT,                          -- 'cron' or admin email if manual
+      -- Turn 2 fields (nullable now)
+      hr_approved_by     TEXT,
+      hr_approved_at     TEXT,
+      hr_rejected_reason TEXT,
+      mgmt_approved_by   TEXT,
+      mgmt_approved_at   TEXT,
+      mgmt_rejected_reason TEXT,
+      accounts_sent_at   TEXT,
+      UNIQUE (employee_id, period),
+      FOREIGN KEY (employee_id) REFERENCES employees(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_consolidated_period ON consolidated_reports(period);
+    CREATE INDEX IF NOT EXISTS idx_consolidated_status ON consolidated_reports(status);
   `);
 
   // Backfill 'period' for older submissions that were created BEFORE the
@@ -530,6 +598,113 @@ Object.assign(stmts, {
     WHERE s.period = ?
       AND s.status IN ('approved', 'settled')
     ORDER BY e.name ASC, s.submitted_at DESC
+  `),
+
+  // ---- Period overrides ----------------------------------------
+  // Find any ACTIVE override matching (period, employee OR global).
+  // Ordered so per-employee overrides win over global ones (rarely
+  // matters, but per-employee is more specific).
+  findActivePeriodOverride: db.prepare(`
+    SELECT * FROM period_overrides
+    WHERE period = ?
+      AND (employee_id = ? OR employee_id IS NULL)
+      AND (revoked_at IS NULL)
+      AND expires_at > datetime('now')
+    ORDER BY employee_id IS NULL, id DESC
+    LIMIT 1
+  `),
+  insertPeriodOverride: db.prepare(`
+    INSERT INTO period_overrides (employee_id, period, expires_at, granted_by, reason)
+    VALUES (@employee_id, @period, @expires_at, @granted_by, @reason)
+  `),
+  revokePeriodOverride: db.prepare(`
+    UPDATE period_overrides
+    SET revoked_at = datetime('now'), revoked_by = ?
+    WHERE id = ? AND revoked_at IS NULL
+  `),
+  listActivePeriodOverrides: db.prepare(`
+    SELECT po.*, e.name AS employee_name, e.email AS employee_email
+    FROM period_overrides po
+    LEFT JOIN employees e ON e.id = po.employee_id
+    WHERE po.revoked_at IS NULL
+      AND po.expires_at > datetime('now')
+    ORDER BY po.period DESC, po.granted_at DESC
+  `),
+  // Historical list — includes revoked + expired, for audit
+  listAllPeriodOverrides: db.prepare(`
+    SELECT po.*, e.name AS employee_name, e.email AS employee_email
+    FROM period_overrides po
+    LEFT JOIN employees e ON e.id = po.employee_id
+    ORDER BY po.granted_at DESC
+    LIMIT 200
+  `),
+
+  // ---- Consolidated reports ------------------------------------
+  //  Fetch approved (and settled — advances count once settled) submissions
+  //  for a given period. Ordered oldest-first so TOC reads chronologically.
+  listApprovedForConsolidation: db.prepare(`
+    SELECT s.id, s.reference, s.form_type, s.period, s.total_amount, s.status,
+           s.actuals_json, s.submitted_at, s.reviewed_by, s.reviewed_at,
+           s.pdf_path, s.purpose_category, s.purpose_other_reason,
+           s.project_id, s.client_name
+    FROM submissions s
+    WHERE s.employee_id = ?
+      AND s.period = ?
+      AND s.status IN ('approved', 'settled')
+    ORDER BY s.submitted_at ASC
+  `),
+  // Employees who have at least one approved/settled submission for a period.
+  listEmployeesWithApprovedForPeriod: db.prepare(`
+    SELECT DISTINCT e.id, e.name, e.email, e.code, e.company, e.level
+    FROM submissions s
+    JOIN employees e ON e.id = s.employee_id
+    WHERE s.period = ?
+      AND s.status IN ('approved', 'settled')
+    ORDER BY e.name
+  `),
+  // UPSERT — on conflict, replaces the PDF and stats. Row id stays stable.
+  upsertConsolidatedReport: db.prepare(`
+    INSERT INTO consolidated_reports (
+      employee_id, period, status, total_amount, submission_count,
+      submission_ids, pdf_path, pdf_page_count, generated_by
+    )
+    VALUES (
+      @employee_id, @period, 'draft', @total_amount, @submission_count,
+      @submission_ids, @pdf_path, @pdf_page_count, @generated_by
+    )
+    ON CONFLICT(employee_id, period) DO UPDATE SET
+      status='draft', total_amount=excluded.total_amount,
+      submission_count=excluded.submission_count,
+      submission_ids=excluded.submission_ids,
+      pdf_path=excluded.pdf_path,
+      pdf_page_count=excluded.pdf_page_count,
+      generated_at=datetime('now'),
+      generated_by=excluded.generated_by,
+      hr_approved_by=NULL, hr_approved_at=NULL, hr_rejected_reason=NULL,
+      mgmt_approved_by=NULL, mgmt_approved_at=NULL, mgmt_rejected_reason=NULL,
+      accounts_sent_at=NULL
+  `),
+  getConsolidatedReport: db.prepare(`
+    SELECT cr.*, e.name AS employee_name, e.email AS employee_email, e.code AS employee_code
+    FROM consolidated_reports cr
+    JOIN employees e ON e.id = cr.employee_id
+    WHERE cr.id = ?
+  `),
+  getConsolidatedReportByEmpPeriod: db.prepare(`
+    SELECT * FROM consolidated_reports WHERE employee_id = ? AND period = ?
+  `),
+  listConsolidatedReports: db.prepare(`
+    SELECT cr.*, e.name AS employee_name, e.email AS employee_email
+    FROM consolidated_reports cr
+    JOIN employees e ON e.id = cr.employee_id
+    ORDER BY cr.period DESC, e.name ASC
+  `),
+  listConsolidatedReportsForPeriod: db.prepare(`
+    SELECT cr.*, e.name AS employee_name, e.email AS employee_email
+    FROM consolidated_reports cr
+    JOIN employees e ON e.id = cr.employee_id
+    WHERE cr.period = ?
+    ORDER BY e.name ASC
   `),
 });
 

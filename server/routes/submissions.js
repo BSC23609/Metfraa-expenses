@@ -11,6 +11,7 @@ const { validate, FORM_META } = require('../services/validators');
 const { getForm } = require('../services/policy');
 const { generatePdf } = require('../services/pdf');
 const { sendSubmissionEmail } = require('../services/email');
+const { checkPeriod } = require('../services/period-lock');
 const syncSvc = require('../services/sync');
 const { requireAuth } = require('../services/auth');
 const { buildReportPdf, buildMergedPreview } = require('../services/report-builder');
@@ -102,6 +103,20 @@ router.post('/', requireAuth, async (req, res) => {
     // 3) Persist the submission + attachments (atomic)
     const reference = generateRef(meta.company, form_type);
     const period = (v.payload && v.payload.period) || null;
+
+    // Enforce the monthly deadline. If the derived period is in a past
+    // month AND we're past the "2nd of the next month" cutoff, the only
+    // way to submit is via an active period-override. Forms with no
+    // period (rare — should be none now that Advance/Cab/Misc all derive
+    // one) sail through untouched.
+    const lock = checkPeriod(period, req.user.id);
+    if (!lock.allowed) {
+      return res.status(423).json({
+        error: lock.message,
+        deadline: lock.deadline,
+        period_locked: true,
+      });
+    }
 
     // Categorization (purpose + project). The validator strips these from
     // the payload and surfaces them on v.meta so they live in their own
@@ -305,6 +320,24 @@ router.patch('/:id', requireAuth, async (req, res) => {
     // 1) Validate the payload (same as submit)
     const v = validate(form_type, payload || {}, req.user);
     if (!v.ok) return res.status(400).json({ error: v.error });
+
+    // Enforce the monthly deadline. If the employee edited the period
+    // (or its underlying dates) to a locked past month, resubmit is
+    // blocked with the same 423 signal the fresh-submit path uses.
+    // EXCEPTION: if this specific submission was returned via a rejected
+    // consolidated report, the `deadline_bypass` flag lets it through
+    // regardless — the employee needs a way to fix what HR/Mgmt flagged.
+    const resubPeriod = (v.payload && v.payload.period) || null;
+    const resubLock = checkPeriod(resubPeriod, req.user.id, {
+      deadline_bypass: existing.deadline_bypass === 1,
+    });
+    if (!resubLock.allowed) {
+      return res.status(423).json({
+        error: resubLock.message,
+        deadline: resubLock.deadline,
+        period_locked: true,
+      });
+    }
 
     // 2) Build attachments from pending uploads — same per-row logic as submit
     const pending = upload_token ? stmts.listPendingByToken.all(upload_token, req.user.id) : [];
@@ -651,6 +684,26 @@ router.get('/:id', requireAuth, (req, res) => {
         size_bytes: a.size_bytes, category: a.category, row_idx: a.row_idx,
       })),
     }
+  });
+});
+
+// GET /api/submissions/period-lock/status?period=YYYY-MM
+//   Used by the form to warn the employee upfront (before they hit
+//   Submit) that the month they're claiming is locked. Returns whether
+//   it's allowed for THIS user (an active override the user benefits
+//   from counts as allowed).
+router.get('/period-lock/status', requireAuth, (req, res) => {
+  const period = (req.query.period || '').trim();
+  const lock = checkPeriod(period, req.user.id);
+  const { isPeriodLockedByCalendar, deadlineLabel } = require('../services/period-lock');
+  const calendarLock = isPeriodLockedByCalendar(period);
+  res.json({
+    period,
+    allowed: !!lock.allowed,
+    calendar_locked: !!calendarLock.locked,
+    via_override: lock.via_override || null,
+    deadline: calendarLock.locked ? deadlineLabel(period) : null,
+    message: lock.allowed ? null : (lock.message || null),
   });
 });
 
