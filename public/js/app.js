@@ -3985,18 +3985,48 @@
     return `${dateStr} · ${daysLeft} day${daysLeft === 1 ? '' : 's'} left`;
   }
 
-  function openOvrModal() {
-    // Reset the modal to defaults every time it opens so stale values
-    // from a previous grant don't leak into the next one.
-    $('#ovrScope').value = 'employee';
-    $('#ovrPeriod').value = '';
+  // Accepts optional prefill: { period, scope: 'global'|'employee', employee_id }
+  // Used by the "Reopen this month" affordance on the Monthly Wrap-up tab
+  // so HR doesn't have to re-type the period they're already looking at.
+  function openOvrModal(prefill) {
+    const p = prefill || {};
+    $('#ovrScope').value = p.scope || 'employee';
+    $('#ovrPeriod').value = p.period || '';
     $('#ovrDays').value = '7';
+    $('#ovrExpiresAt').value = defaultExpiresAtIstLocal();
     $('#ovrReason').value = '';
-    // Populate employee dropdown. Prefer the admin's cached employee
-    // list if already loaded (Employees tab), otherwise fetch fresh.
+    // Reset the mode toggle to datetime (the more precise / expected one)
+    const radios = document.getElementsByName('ovrExpiryMode');
+    for (const r of radios) r.checked = (r.value === 'datetime');
+    setOvrExpiryModeVisual('datetime');
+
     populateOvrEmployeeSelect();
-    $('#ovrEmployeeField').style.display = '';
+    if (p.employee_id) {
+      // Set once dropdown populates
+      setTimeout(() => { const s = $('#ovrEmployee'); if (s) s.value = String(p.employee_id); }, 40);
+    }
+    // Reflect scope → employee field visibility
+    $('#ovrEmployeeField').style.display = ($('#ovrScope').value === 'global') ? 'none' : '';
     $('#ovrModalBackdrop').classList.add('show');
+  }
+
+  // Compute a sensible default for the datetime picker: 24 hours from
+  // now, in IST wall time, formatted as the browser expects for
+  // <input type="datetime-local"> (YYYY-MM-DDTHH:MM).
+  function defaultExpiresAtIstLocal() {
+    const nowIst = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const in24 = new Date(nowIst.getTime() + 24 * 60 * 60 * 1000);
+    const yyyy = in24.getUTCFullYear();
+    const mm = String(in24.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(in24.getUTCDate()).padStart(2, '0');
+    const hh = String(in24.getUTCHours()).padStart(2, '0');
+    const mn = String(in24.getUTCMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}T${hh}:${mn}`;
+  }
+
+  function setOvrExpiryModeVisual(mode) {
+    $('#ovrDatetimeField').style.display = (mode === 'datetime') ? '' : 'none';
+    $('#ovrDaysField').style.display     = (mode === 'days')     ? '' : 'none';
   }
 
   async function populateOvrEmployeeSelect() {
@@ -4010,7 +4040,6 @@
         state.employees = emps;
       } catch (_) { emps = []; }
     }
-    // Only show active employees — inactive ones can't submit anyway
     const active = emps.filter(e => e.is_active !== 0 && e.is_active !== false);
     sel.innerHTML = '<option value="">— Select —</option>'
       + active.map(e => `<option value="${e.id}">${e.name} · ${e.email}</option>`).join('');
@@ -4019,15 +4048,10 @@
   async function saveOverride() {
     const scope = $('#ovrScope').value;
     const period = $('#ovrPeriod').value;
-    const days = parseInt($('#ovrDays').value, 10);
     const reason = $('#ovrReason').value.trim();
 
     if (!period || !/^\d{4}-\d{2}$/.test(period)) {
       toast('Pick a period (month).', 'error');
-      return;
-    }
-    if (!Number.isFinite(days) || days < 1 || days > 30) {
-      toast('Valid for must be between 1 and 30 days.', 'error');
       return;
     }
     let employeeId = null;
@@ -4037,20 +4061,34 @@
       employeeId = parseInt(raw, 10);
     }
 
+    // Which expiry mode?
+    const modeRadio = document.querySelector('input[name="ovrExpiryMode"]:checked');
+    const mode = modeRadio ? modeRadio.value : 'datetime';
+    const body = { employee_id: employeeId, period, reason };
+    if (mode === 'datetime') {
+      const raw = $('#ovrExpiresAt').value;
+      if (!raw) { toast('Pick a date & time.', 'error'); return; }
+      body.expires_at_ist = raw;
+    } else {
+      const days = parseInt($('#ovrDays').value, 10);
+      if (!Number.isFinite(days) || days < 1 || days > 30) {
+        toast('Days valid must be between 1 and 30.', 'error');
+        return;
+      }
+      body.days_valid = days;
+    }
+
     showLoading('Granting override…');
     try {
       await api('/api/admin/period-overrides', {
         method: 'POST',
-        body: JSON.stringify({
-          employee_id: employeeId,
-          period,
-          days_valid: days,
-          reason,
-        }),
+        body: JSON.stringify(body),
       });
       toast('Override granted', 'success');
       $('#ovrModalBackdrop').classList.remove('show');
-      await loadOverrides();
+      // Refresh whichever tab we came from
+      if (adminTab === 'overrides') await loadOverrides();
+      if (adminTab === 'consolidated') await loadConsolidated();
     } catch (err) {
       toast(err.message || 'Grant failed', 'error');
     } finally {
@@ -4701,12 +4739,16 @@
   $('#payDetailBackdrop') && $('#payDetailBackdrop').addEventListener('click', (e) => { if (e.target.id === 'payDetailBackdrop') { $('#payDetailBackdrop').classList.remove('show'); paySelectedEmp = null; } });
 
   // Overrides tab
-  $('#ovrGrantBtn') && $('#ovrGrantBtn').addEventListener('click', openOvrModal);
+  $('#ovrGrantBtn') && $('#ovrGrantBtn').addEventListener('click', () => openOvrModal());
   $('#ovrCancel')   && $('#ovrCancel').addEventListener('click', () => $('#ovrModalBackdrop').classList.remove('show'));
   $('#ovrSave')     && $('#ovrSave').addEventListener('click', saveOverride);
   $('#ovrScope')    && $('#ovrScope').addEventListener('change', (e) => {
     // Global overrides don't need an employee — hide that field
     $('#ovrEmployeeField').style.display = e.target.value === 'global' ? 'none' : '';
+  });
+  // Expiry mode toggle (Exact date & time vs N days from now)
+  document.getElementsByName('ovrExpiryMode').forEach && document.getElementsByName('ovrExpiryMode').forEach(r => {
+    r.addEventListener('change', (e) => setOvrExpiryModeVisual(e.target.value));
   });
   $('#ovrModalBackdrop') && $('#ovrModalBackdrop').addEventListener('click', (e) => {
     if (e.target.id === 'ovrModalBackdrop') $('#ovrModalBackdrop').classList.remove('show');
@@ -4715,6 +4757,11 @@
   // Consolidated Reports tab
   $('#conMonth')       && $('#conMonth').addEventListener('change', loadConsolidated);
   $('#conRefreshBtn')  && $('#conRefreshBtn').addEventListener('click', loadConsolidated);
+  $('#conReopenBtn')   && $('#conReopenBtn').addEventListener('click', () => {
+    // Prefill with the currently-filtered month + global scope
+    const period = ($('#conMonth').value || '').trim();
+    openOvrModal({ period, scope: 'global' });
+  });
 
   boot();
 })();

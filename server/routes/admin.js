@@ -934,22 +934,51 @@ router.post('/period-overrides', requireAdmin, (req, res) => {
       employeeId = n;
     }
 
-    // days_valid: how many days the override lasts. 1–30. Default 7.
-    let daysValid = 7;
-    if (body.days_valid != null && body.days_valid !== '') {
-      const n = parseInt(body.days_valid, 10);
-      if (!Number.isFinite(n) || n < 1 || n > 30) return res.status(400).json({ error: 'days_valid must be 1–30' });
-      daysValid = n;
+    // Two ways to specify when the override expires:
+    //   1. expires_at_ist: 'YYYY-MM-DDTHH:MM' — treated as wall-clock IST,
+    //      converted to UTC for storage. This is the precise mode.
+    //   2. days_valid: 1..30 — 'N days from now'. Quick mode. Kept for
+    //      backward compatibility with the old modal.
+    // If both are passed, expires_at_ist wins.
+    let expiresAtUtc; // stored as 'YYYY-MM-DD HH:MM:SS' in SQLite datetime format (UTC)
+    let mode; let daysValid = null;
+
+    if (body.expires_at_ist && String(body.expires_at_ist).trim()) {
+      // Parse as IST wall time. e.g. '2026-08-05T18:00' means Aug 5 6 PM IST.
+      // Subtract 5:30 to get UTC.
+      const raw = String(body.expires_at_ist).trim();
+      const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(raw);
+      if (!m) return res.status(400).json({ error: 'expires_at_ist must be YYYY-MM-DDTHH:MM' });
+      const [_, y, mo, d, hh, mm, ss] = m;
+      // Build the IST wall-time instant, then shift by -5:30 hours to get UTC
+      const istMs = Date.UTC(+y, +mo - 1, +d, +hh, +mm, +(ss || 0));
+      const utcMs = istMs - (5.5 * 60 * 60 * 1000);
+      if (utcMs <= Date.now()) return res.status(400).json({ error: 'expires_at_ist must be in the future' });
+      // Cap at 60 days out — anything longer is almost certainly a typo
+      if (utcMs > Date.now() + 60 * 24 * 60 * 60 * 1000) {
+        return res.status(400).json({ error: 'expires_at_ist cannot be more than 60 days from now' });
+      }
+      expiresAtUtc = new Date(utcMs).toISOString().slice(0, 19).replace('T', ' ');
+      mode = 'expires_at_ist';
+    } else {
+      // Fall back to days_valid mode
+      daysValid = 7;
+      if (body.days_valid != null && body.days_valid !== '') {
+        const n = parseInt(body.days_valid, 10);
+        if (!Number.isFinite(n) || n < 1 || n > 30) return res.status(400).json({ error: 'days_valid must be 1–30' });
+        daysValid = n;
+      }
+      expiresAtUtc = new Date(Date.now() + daysValid * 24 * 60 * 60 * 1000)
+        .toISOString().slice(0, 19).replace('T', ' ');
+      mode = 'days_valid';
     }
-    const expiresAt = new Date(Date.now() + daysValid * 24 * 60 * 60 * 1000)
-      .toISOString().slice(0, 19).replace('T', ' ');
 
     const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 500) : '';
 
     const info = stmts.insertPeriodOverride.run({
       employee_id: employeeId,
       period,
-      expires_at: expiresAt,
+      expires_at: expiresAtUtc,
       granted_by: req.user.email,
       reason: reason || null,
     });
@@ -957,11 +986,11 @@ router.post('/period-overrides', requireAdmin, (req, res) => {
     stmts.insertAudit.run({
       actor_email: req.user.email, action: 'GRANT_PERIOD_OVERRIDE',
       target_type: 'period_override', target_id: info.lastInsertRowid,
-      meta_json: JSON.stringify({ period, employee_id: employeeId, days_valid: daysValid, expires_at: expiresAt, reason }),
+      meta_json: JSON.stringify({ period, employee_id: employeeId, mode, days_valid: daysValid, expires_at: expiresAtUtc, reason }),
       ip_address: req.ip,
     });
 
-    res.json({ ok: true, id: info.lastInsertRowid, expires_at: expiresAt });
+    res.json({ ok: true, id: info.lastInsertRowid, expires_at: expiresAtUtc });
   } catch (err) {
     console.error('[period-overrides grant]', err);
     res.status(500).json({ error: err.message || 'Could not grant override' });
