@@ -340,6 +340,46 @@ router.post('/submissions/:id/unapprove', requireAdmin, (req, res) => {
   }
 });
 
+// ---- Recall a sent-back (draft) submission -------------------------
+// Undo an earlier "Send back" so the submission returns to pending and
+// HR can re-decide (approve, send back again, or mark settled-already).
+// Semantically distinct from unapprove — this pulls a draft OUT of the
+// employee's queue rather than reverting an approval. Clears the
+// changes_required marker so the "action required" flag disappears from
+// the employee's hub.
+router.post('/submissions/:id/recall', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.status !== 'draft') {
+    return res.status(400).json({ error: `Only sent-back (draft) submissions can be recalled. This one is '${sub.status}'.` });
+  }
+  const reason = ((req.body && req.body.reason) || '').trim();
+  if (reason.length < 3) return res.status(400).json({ error: 'Please give a reason (3+ chars).' });
+  if (reason.length > 1000) return res.status(400).json({ error: 'Reason too long (max 1000 chars).' });
+
+  try {
+    // Preserve the original review note (which described what to fix)
+    // and append the recall reason so the audit trail on the row has
+    // both — the earlier send-back context AND why HR pulled it back.
+    const combinedNote = (sub.review_note ? `${sub.review_note}\n---\n[Recalled] ` : '[Recalled] ') + reason;
+    stmts.recallDraftSubmission.run({
+      id, reviewed_by: req.user.email,
+      review_note: combinedNote.slice(0, 2000),
+    });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'RECALL_SENT_BACK',
+      target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, reason: reason.slice(0, 500) }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[recall]', err);
+    res.status(500).json({ error: err.message || 'Recall failed' });
+  }
+});
+
 // ---- Employees: list ----------------------------------------------
 router.get('/employees', requireAdmin, (req, res) => {
   const includeInactive = req.query.all === '1';

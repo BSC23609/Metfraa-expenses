@@ -3129,11 +3129,13 @@
   //     (Settled already is only meaningful for a fresh pending — hidden on
   //      settlement flows since those already have an actuals amount.)
   //   Approved (not in live consolidated):  View · Reopen
+  //   Draft (sent back to employee): View · Recall
   //   Any other state: View only.
   function renderRowActions(s) {
     const isSettlement = s.status === 'settlement_pending';
     const isPending = s.status === 'pending' || s.status === 'settlement_pending';
     const isApproved = s.status === 'approved';
+    const isDraft = s.status === 'draft';
     return el('div', { class: 'admin-actions' },
       el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
       isPending ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : 'Approve') : null,
@@ -3155,6 +3157,15 @@
         title: 'Revert to pending so you can re-review this submission',
         onclick: () => unapproveSubmission(s),
       }, 'Reopen') : null,
+      // "Recall" — for sent-back submissions that HR wants back in their
+      // queue. Same amber styling as Reopen since it's semantically the
+      // same action (undo a review decision).
+      isDraft ? el('button', {
+        class: 'view',
+        style: 'background:transparent;color:#b45309;border-color:#fcd34d;',
+        title: 'Pull this back into Pending Approvals to re-decide',
+        onclick: () => recallDraftSubmission(s),
+      }, 'Recall') : null,
     );
   }
 
@@ -3500,6 +3511,41 @@
       drawPendingTable(); drawSubmissionsTable();
     } catch (err) {
       toast(err.message || 'Reopen failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // Pull a sent-back (draft) submission back into HR's queue. Semantically
+  // parallel to unapprove — status flips to pending, HR re-decides — but
+  // labeled "Recall" here because the submission belongs to the employee
+  // at that moment, and HR is yanking it back.
+  async function recallDraftSubmission(s) {
+    if (s.status !== 'draft') {
+      toast(`Only sent-back submissions can be recalled (this one is '${s.status}').`, 'error');
+      return;
+    }
+    const reason = await promptModal({
+      title: 'Recall this sent-back submission?',
+      body: `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. This pulls it back into Pending Approvals so you can re-decide (approve, send back again, or mark settled-already). The "action required" flag on the employee's hub disappears.\n\nWhy are you recalling?`,
+      placeholder: 'e.g. Realized my send-back note was wrong — the bill IS attached',
+      confirmText: 'Recall',
+      required: true,
+    });
+    if (reason === null) return;
+    if (!reason || !reason.trim()) {
+      toast('Please give a reason.', 'error');
+      return;
+    }
+    showLoading('Recalling…');
+    try {
+      await api(`/api/admin/submissions/${s.id}/recall`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      toast('Recalled · back in Pending Approvals', 'success');
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Recall failed', 'error');
     } finally { hideLoading(); }
   }
 

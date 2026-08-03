@@ -447,6 +447,17 @@ const stmts = {
       reviewed_at=datetime('now'), review_note=@review_note
     WHERE id=@id
   `),
+  // HR pulling back a sent-back (draft) submission. Same effect as
+  // unapprove — status flips to 'pending' so HR can re-decide — but
+  // must also CLEAR the changes_required + returned_at markers set by
+  // the original send-back, otherwise the pending row keeps showing
+  // the "action required" flag and confuses the review UI.
+  recallDraftSubmission: db.prepare(`
+    UPDATE submissions SET status='pending', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note,
+      changes_required=NULL, returned_at=NULL
+    WHERE id=@id
+  `),
   // Check if a submission is currently locked by a non-rejected
   // consolidated report — if so, un-approval must be blocked (the money
   // has either already moved to accounts, or Arasu's mid-review).
