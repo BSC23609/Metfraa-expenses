@@ -3125,13 +3125,36 @@
   }
 
   // Renders the row of action buttons for a submission inside a folder.
+  //   Pending / settlement-pending:  View · Approve · Send back · [Settled already]
+  //     (Settled already is only meaningful for a fresh pending — hidden on
+  //      settlement flows since those already have an actuals amount.)
+  //   Approved (not in live consolidated):  View · Reopen
+  //   Any other state: View only.
   function renderRowActions(s) {
     const isSettlement = s.status === 'settlement_pending';
     const isPending = s.status === 'pending' || s.status === 'settlement_pending';
+    const isApproved = s.status === 'approved';
     return el('div', { class: 'admin-actions' },
       el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
       isPending ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : 'Approve') : null,
       isPending ? el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, isSettlement ? 'Reject Settlement' : 'Send back') : null,
+      // "Settled already" — only for fresh pending, not settlement flows.
+      // Muted styling so it doesn't compete visually with the primary Approve.
+      (isPending && !isSettlement) ? el('button', {
+        class: 'view',
+        style: 'background:transparent;color:#6b7280;border-color:#d1d5db;',
+        title: 'Money already paid outside the portal — close without generating a report',
+        onclick: () => settleOfflineSubmission(s),
+      }, 'Settled already') : null,
+      // "Reopen" — for approved submissions that HR needs to un-approve
+      // and re-review. Server will refuse if it's already in a live
+      // consolidated report.
+      isApproved ? el('button', {
+        class: 'view',
+        style: 'background:transparent;color:#b45309;border-color:#fcd34d;',
+        title: 'Revert to pending so you can re-review this submission',
+        onclick: () => unapproveSubmission(s),
+      }, 'Reopen') : null,
     );
   }
 
@@ -3413,6 +3436,70 @@
       drawPendingTable(); drawSubmissionsTable();
     } catch (err) {
       toast(err.message || 'Send-back failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // Mark a pending submission as already-paid outside the portal. Doesn't
+  // generate a report, doesn't touch OneDrive, doesn't fold into any
+  // consolidated report — pure record-keeping close.
+  async function settleOfflineSubmission(s) {
+    if (s.status !== 'pending') {
+      toast(`Only pending submissions can be marked settled-already (this one is '${s.status}').`, 'error');
+      return;
+    }
+    const note = await promptModal({
+      title: 'Mark as settled already?',
+      body: `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. Use this when the money was paid outside the portal (e.g. cash advance handed over, or payment happened separately). This will NOT go into any consolidated report — it's a record-only close.\n\nOptional note (for the audit trail):`,
+      placeholder: 'e.g. Paid in cash on 25 Jul',
+      confirmText: 'Mark settled',
+      required: false,
+    });
+    if (note === null) return; // cancelled
+    showLoading('Marking settled…');
+    try {
+      await api(`/api/admin/submissions/${s.id}/settle-offline`, {
+        method: 'POST',
+        body: JSON.stringify({ note: (note || '').trim() }),
+      });
+      toast('Marked as settled-already', 'success');
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Failed to mark settled', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // Revert an already-approved submission back to pending. Blocked by
+  // the server if the submission is part of a consolidated report that's
+  // pending_mgmt or approved. Requires a reason (for the audit log).
+  async function unapproveSubmission(s) {
+    if (s.status !== 'approved') {
+      toast(`Only approved submissions can be reopened (this one is '${s.status}').`, 'error');
+      return;
+    }
+    const reason = await promptModal({
+      title: 'Reopen this approved submission?',
+      body: `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. This will revert it to pending so you can re-review. Won't work if it's already part of a consolidated report awaiting Arasu or already sent to accounts.\n\nWhy are you reopening?`,
+      placeholder: 'e.g. Wrong amount — needs a fix before we send to Arasu',
+      confirmText: 'Reopen',
+      required: true,
+    });
+    if (reason === null) return;
+    if (!reason || !reason.trim()) {
+      toast('Please give a reason.', 'error');
+      return;
+    }
+    showLoading('Reopening…');
+    try {
+      await api(`/api/admin/submissions/${s.id}/unapprove`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      toast('Reopened · back in Pending Approvals', 'success');
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Reopen failed', 'error');
     } finally { hideLoading(); }
   }
 
@@ -4182,6 +4269,7 @@
       addIf(chip(r.pending_count,          'pending',   'pending'));
       addIf(chip(r.approved_count,         'approved',  'approved'));
       addIf(chip(r.settled_count,          'settled',   'approved'));
+      addIf(chip(r.settled_offline_count,  'offline',   'settled_offline'));
       addIf(chip(r.advance_approved_count, 'advance',   'pending'));
       addIf(chip(r.draft_count,            'draft',     'draft'));
       addIf(chip(r.rejected_count,         'rejected',  'rejected'));

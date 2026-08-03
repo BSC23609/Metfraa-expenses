@@ -257,6 +257,89 @@ router.post('/submissions/:id/reject', requireAdmin, async (req, res) => {
   }
 });
 
+// ---- Settle offline ------------------------------------------------
+// HR marks a submission as already-paid outside the portal (e.g. cash
+// advance handed over before the trip, or the employee got reimbursed
+// separately and is filing after the fact). No PDF report is generated
+// and no OneDrive sync happens — this is purely a record-keeping close.
+// The submission gets status='settled_offline' so consolidation queries
+// skip it.
+router.post('/submissions/:id/settle-offline', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.status !== 'pending') {
+    return res.status(400).json({ error: `Only pending submissions can be marked settled-already. This one is '${sub.status}'.` });
+  }
+  const note = ((req.body && req.body.note) || '').trim().slice(0, 500);
+  try {
+    stmts.settleOfflineSubmission.run({
+      id, reviewed_by: req.user.email, review_note: note,
+    });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'SETTLE_OFFLINE',
+      target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, note }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[settle-offline]', err);
+    res.status(500).json({ error: err.message || 'Failed to mark settled.' });
+  }
+});
+
+// ---- Un-approve (edit an approved submission) ----------------------
+// Revert an approved submission back to 'pending' so HR can re-review.
+// Only allowed when the submission isn't referenced by a consolidated
+// report in status pending_mgmt or approved — those states mean either
+// Arasu is currently reviewing it, or accounts@ has already been sent
+// the money. In both cases un-approving is nonsensical/dangerous, so we
+// tell HR to reject the consolidated report first (which returns all
+// submissions to draft with deadline_bypass=1).
+router.post('/submissions/:id/unapprove', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.status !== 'approved') {
+    return res.status(400).json({ error: `Only approved submissions can be reopened. This one is '${sub.status}'.` });
+  }
+  const reason = ((req.body && req.body.reason) || '').trim();
+  if (reason.length < 3) return res.status(400).json({ error: 'Please give a reason (3+ chars).' });
+  if (reason.length > 1000) return res.status(400).json({ error: 'Reason too long (max 1000 chars).' });
+
+  // Guard: is this submission locked by a live consolidated report?
+  const lockedBy = stmts.submissionInLiveConsolidatedReport.get(id);
+  if (lockedBy) {
+    const label = lockedBy.status === 'approved'
+      ? `an approved consolidated report for ${lockedBy.period} (accounts@ has already been notified)`
+      : `a consolidated report for ${lockedBy.period} currently awaiting Arasu's approval`;
+    return res.status(409).json({
+      error: `Cannot reopen — this submission is part of ${label}. To make changes, ask Arasu to reject the consolidated report first (which returns every included submission to the employee as a draft), or wait for the current consolidated flow to complete.`,
+    });
+  }
+
+  try {
+    // Merge the old review_note (from the approval) with the reason for
+    // un-approval, so the audit trail on the row itself keeps both.
+    const combinedNote = (sub.review_note ? `${sub.review_note}\n---\n[Reopened] ` : '[Reopened] ') + reason;
+    stmts.unapproveSubmission.run({
+      id, reviewed_by: req.user.email,
+      review_note: combinedNote.slice(0, 2000),
+    });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'UNAPPROVE',
+      target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, reason: reason.slice(0, 500) }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[unapprove]', err);
+    res.status(500).json({ error: err.message || 'Reopen failed' });
+  }
+});
+
 // ---- Employees: list ----------------------------------------------
 router.get('/employees', requireAdmin, (req, res) => {
   const includeInactive = req.query.all === '1';

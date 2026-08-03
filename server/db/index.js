@@ -428,6 +428,40 @@ const stmts = {
       review_note=@review_note, changes_required=@changes_required
     WHERE id=@id
   `),
+  // HR marking a submission as already paid outside the portal (e.g.
+  // cash advance handed over, or payment cleared before the employee got
+  // around to filing). Uses a distinct status so consolidation queries
+  // ignore it — it's not going into any consolidated report; the money
+  // moved already.
+  settleOfflineSubmission: db.prepare(`
+    UPDATE submissions SET status='settled_offline', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note
+    WHERE id=@id
+  `),
+  // Un-approve an already-approved submission — reverts to 'pending' so
+  // HR can then choose Approve / Send back / Settled already again. The
+  // review_note keeps the reason for the un-approve; reviewed_by/at get
+  // overwritten so the audit trail shows who un-approved.
+  unapproveSubmission: db.prepare(`
+    UPDATE submissions SET status='pending', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note
+    WHERE id=@id
+  `),
+  // Check if a submission is currently locked by a non-rejected
+  // consolidated report — if so, un-approval must be blocked (the money
+  // has either already moved to accounts, or Arasu's mid-review).
+  //
+  // Uses JSON1 to test membership in the submission_ids JSON array on
+  // each consolidated_reports row.
+  submissionInLiveConsolidatedReport: db.prepare(`
+    SELECT cr.id, cr.status, cr.period FROM consolidated_reports cr
+    WHERE cr.status IN ('pending_mgmt','approved')
+      AND EXISTS (
+        SELECT 1 FROM json_each(cr.submission_ids)
+        WHERE CAST(json_each.value AS INTEGER) = ?
+      )
+    LIMIT 1
+  `),
   // Employee resubmitting an edited draft. Clears the "needs to change"
   // marker but keeps reviewed_by/reviewed_at as the audit of the LAST
   // rejection (overwritten if HR sends it back again).
@@ -804,6 +838,7 @@ Object.assign(stmts, {
       SUM(CASE WHEN s.status = 'pending'          THEN 1 ELSE 0 END)    AS pending_count,
       SUM(CASE WHEN s.status = 'approved'         THEN 1 ELSE 0 END)    AS approved_count,
       SUM(CASE WHEN s.status = 'settled'          THEN 1 ELSE 0 END)    AS settled_count,
+      SUM(CASE WHEN s.status = 'settled_offline'  THEN 1 ELSE 0 END)    AS settled_offline_count,
       SUM(CASE WHEN s.status = 'draft'            THEN 1 ELSE 0 END)    AS draft_count,
       SUM(CASE WHEN s.status = 'rejected'         THEN 1 ELSE 0 END)    AS rejected_count,
       SUM(CASE WHEN s.status = 'advance_approved' THEN 1 ELSE 0 END)    AS advance_approved_count,
