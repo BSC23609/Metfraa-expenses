@@ -1264,6 +1264,41 @@ router.post('/consolidated/:id/reject', requireAdmin, async (req, res) => {
   }
 });
 
+// Regenerate the PDF for a pending_mgmt report — useful when the file
+// on disk got lost (Render deploy wiping ephemeral state) or when HR
+// wants to refresh a stale-looking report before Arasu reviews. Only
+// works while the report is in pending_mgmt; approved reports are
+// finalised, and rejected reports need to be re-sent from scratch.
+router.post('/consolidated/:id/regenerate-pdf', requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const r = stmts.getConsolidatedReport.get(id);
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    if (!['pending_mgmt', 'approved'].includes(r.status)) {
+      return res.status(400).json({ error: `Can only regenerate a report that's awaiting Arasu or already approved. This one is '${r.status}'.` });
+    }
+    const { generateForEmployeePeriod } = require('../services/consolidate-scheduler');
+    const { signoffsFor } = require('../services/consolidated-approval');
+    const employee = { id: r.employee_id, name: r.employee_name, email: r.employee_email, code: r.employee_code };
+    const result = await generateForEmployeePeriod(r.employee_id, r.period, {
+      generatedBy: req.user.email,
+      employee,
+      signoffs: signoffsFor(r),
+      keepStatus: true,  // don't wipe approval columns
+    });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'REGENERATE_CONSOLIDATED_PDF',
+      target_type: 'consolidated_report', target_id: id,
+      meta_json: JSON.stringify({ period: r.period, employee_id: r.employee_id, ...result }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[regenerate-pdf]', err);
+    res.status(500).json({ error: err.message || 'Regeneration failed' });
+  }
+});
+
 router.post('/consolidated/:id/resend-email', requireAdmin, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);

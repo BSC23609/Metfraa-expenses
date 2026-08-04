@@ -4361,9 +4361,19 @@
           }, 'Mgmt Review'));
           actions.appendChild(el('button', {
             class: 'view', style: 'background:transparent;color:var(--bsg-muted);',
+            title: 'Rebuild the PDF from scratch — use if the file was lost during a deploy and Open PDF is failing',
+            onclick: () => regenerateReport(cr),
+          }, 'Regenerate PDF'));
+          actions.appendChild(el('button', {
+            class: 'view', style: 'background:transparent;color:var(--bsg-muted);',
             onclick: () => resendEmail(cr),
           }, 'Resend'));
         } else if (cr.status === 'approved') {
+          actions.appendChild(el('button', {
+            class: 'view', style: 'background:transparent;color:var(--bsg-muted);',
+            title: 'Rebuild the PDF from scratch — use if the file was lost and Resend to Accounts is failing',
+            onclick: () => regenerateReport(cr),
+          }, 'Regenerate PDF'));
           actions.appendChild(el('button', {
             class: 'view', style: 'background:transparent;color:var(--bsg-muted);',
             onclick: () => resendEmail(cr),
@@ -4587,6 +4597,26 @@
     } finally { hideLoading(); }
   }
 
+  // Rebuild the PDF for a pending_mgmt report. Useful when Open PDF
+  // fails (file lost during a Render deploy) or before Arasu reviews if
+  // HR made corrections to the underlying submissions after sending.
+  async function regenerateReport(report) {
+    const ok = await confirmModal({
+      title: 'Rebuild the PDF?',
+      body: `Regenerate ${report.employee_name}'s consolidated report for ${report.period} from scratch. This uses the current approved submissions and keeps your HR sign-off. Won't send any new emails.`,
+      confirmText: 'Rebuild',
+    });
+    if (!ok) return;
+    showLoading('Rebuilding PDF…');
+    try {
+      const res = await api(`/api/admin/consolidated/${report.id}/regenerate-pdf`, { method: 'POST' });
+      toast(`PDF rebuilt · ${res.page_count} pages`, 'success');
+      await loadConsolidated();
+    } catch (err) {
+      toast(err.message || 'Rebuild failed', 'error');
+    } finally { hideLoading(); }
+  }
+
   // SMTP diagnostics. Runs .verify() against the configured server, shows
   // the results in a modal, and lets HR send a test message to any email
   // to confirm the receiving side isn't the problem.
@@ -4655,14 +4685,46 @@
       dl.appendChild(el('dt', { style: 'color:var(--bsg-muted);' }, k));
       dl.appendChild(el('dd', { style: 'margin:0;color:var(--bsg-ink);' }, v == null ? '(not set)' : String(v)));
     };
-    kv('SMTP_HOST',       config.host);
+    // Two helpers: format a length hint (safe — reveals only string
+    // length, not content), and a red-warning row when something looks
+    // off (whitespace, weird hidden character at either end).
+    const passHint = config.pass_set
+      ? `(set · ${config.pass_length} chars${config.pass_has_whitespace ? ' · ⚠️ has whitespace' : ''}${
+          config.pass_first_char_code > 127 || config.pass_last_char_code > 127 ? ' · ⚠️ has non-ASCII char' : ''
+        })`
+      : '(not set)';
+    const userHint = config.user
+      ? `${config.user}${config.user_has_whitespace ? ' ⚠️ has whitespace' : ''}`
+      : null;
+    const hostHint = config.host
+      ? `${config.host}${config.host_has_whitespace ? ' ⚠️ has whitespace' : ''}`
+      : null;
+    kv('SMTP_HOST',       hostHint);
     kv('SMTP_PORT',       config.port);
     kv('SMTP_SECURE',     config.secure);
-    kv('SMTP_USER',       config.user);
-    kv('SMTP_PASS',       config.pass_set ? '(set)' : '(not set)');
+    kv('SMTP_USER',       userHint);
+    kv('SMTP_PASS',       passHint);
     kv('SMTP_FROM_NAME',  config.from_name);
     kv('SMTP_FROM_EMAIL', config.from_email);
     body.appendChild(dl);
+    // If we spotted any suspicious characters or lengths, flag them for HR
+    const warnings = [];
+    if (config.pass_has_whitespace) warnings.push('Your SMTP_PASS has leading or trailing whitespace. That could be Render trimming a space at paste time, or a newline at the end. Re-paste it carefully with no extra characters.');
+    if (config.user_has_whitespace) warnings.push('Your SMTP_USER has leading or trailing whitespace.');
+    if (config.host_has_whitespace) warnings.push('Your SMTP_HOST has leading or trailing whitespace.');
+    if (config.pass_set && (config.pass_first_char_code > 127 || config.pass_last_char_code > 127)) {
+      warnings.push('Your SMTP_PASS starts or ends with a non-ASCII character (a curly quote or byte-order-mark from a text editor). Re-copy the password from Microsoft\'s UI and paste as plain text.');
+    }
+    if (config.pass_set && config.pass_length < 8) {
+      warnings.push(`SMTP_PASS is only ${config.pass_length} characters — that's shorter than any real password. Something got truncated during paste.`);
+    }
+    if (warnings.length) {
+      const w = el('div', { style: 'margin-top:14px;padding:10px 14px;background:#fef3c7;border-left:4px solid #d97706;border-radius:3px;font-size:12px;color:#78350f;line-height:1.5;' });
+      for (const line of warnings) {
+        w.appendChild(el('div', { style: 'margin:4px 0;' }, '⚠️ ' + line));
+      }
+      body.appendChild(w);
+    }
     backdrop.classList.add('show');
   }
 

@@ -456,15 +456,33 @@ async function sendConsolidatedToAccounts({ report, employee, pdfPath }) {
     from: `"${fromName}" <${fromEmail}>`,
     to, cc, subject, html,
   };
-  // Attach the signed PDF if available on disk
-  if (pdfPath && require('fs').existsSync(pdfPath)) {
-    const safeName = String(employee.name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_');
-    mailOpts.attachments = [{
-      filename: `${report.period}_${safeName}_consolidated.pdf`,
-      path: pdfPath,
-      contentType: 'application/pdf',
-    }];
+  // Attach the signed PDF. This email is meaningless without it — the
+  // whole point is to send Accounts what to pay from. If the file is
+  // missing on disk (Render's ephemeral filesystem lost it during a
+  // deploy, or the path is stale), fail loud with a specific error so
+  // HR knows to regenerate the report.
+  const fsMod = require('fs');
+  if (!pdfPath) {
+    throw new Error('accounts@ email skipped: no pdf_path recorded on the consolidated report. Regenerate the report and try again.');
   }
+  if (!fsMod.existsSync(pdfPath)) {
+    throw new Error(`accounts@ email skipped: PDF file not found on disk at ${pdfPath}. It may have been lost during a deploy — try Regenerate on the row and then approve again.`);
+  }
+  try {
+    const stat = fsMod.statSync(pdfPath);
+    if (stat.size === 0) {
+      throw new Error(`accounts@ email skipped: PDF file at ${pdfPath} is 0 bytes.`);
+    }
+  } catch (e) {
+    if (e.message.includes('accounts@ email skipped')) throw e;
+    throw new Error(`accounts@ email skipped: could not stat PDF file at ${pdfPath}: ${e.message}`);
+  }
+  const safeName = String(employee.name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_');
+  mailOpts.attachments = [{
+    filename: `${report.period}_${safeName}_consolidated.pdf`,
+    path: pdfPath,
+    contentType: 'application/pdf',
+  }];
 
   const info = await getTransporter().sendMail(mailOpts);
   return { messageId: info.messageId, recipients: [to, cc] };
@@ -475,12 +493,26 @@ async function sendConsolidatedToAccounts({ report, employee, pdfPath }) {
 // by the /api/admin/smtp-test endpoint so HR can see why email isn't
 // working without digging into Render logs.
 async function diagnoseSmtp() {
+  const rawPass = process.env.SMTP_PASS || '';
+  const rawUser = process.env.SMTP_USER || '';
+  const rawHost = process.env.SMTP_HOST || '';
   const config = {
-    host:      process.env.SMTP_HOST || null,
+    host:      rawHost || null,
+    host_length: rawHost.length,
+    host_has_whitespace: rawHost !== rawHost.trim(),
     port:      parseInt(process.env.SMTP_PORT || '587', 10),
     secure:    String(process.env.SMTP_SECURE || 'false') === 'true',
-    user:      process.env.SMTP_USER || null,
-    pass_set:  !!process.env.SMTP_PASS,
+    user:      rawUser || null,
+    user_length: rawUser.length,
+    user_has_whitespace: rawUser !== rawUser.trim(),
+    // These reveal the two most common Render env-var mistakes without
+    // exposing the actual password: pasted with trailing spaces, or a
+    // control character got included during copy from the Microsoft UI.
+    pass_set:  !!rawPass,
+    pass_length: rawPass.length,
+    pass_has_whitespace: rawPass !== rawPass.trim(),
+    pass_first_char_code: rawPass.charCodeAt(0) || null,   // to spot BOM / hidden chars
+    pass_last_char_code:  rawPass.charCodeAt(rawPass.length - 1) || null,
     from_name: process.env.SMTP_FROM_NAME || null,
     from_email:process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || null,
   };
