@@ -336,16 +336,20 @@ function accountsInbox() { return process.env.CONSOLIDATED_ACCOUNTS_EMAIL || 'ac
 // Review email — sent to HR when a report is generated, sent to Mgmt
 // once HR approves. Frames "please review + approve/reject" with a link
 // to the portal review page (login required).
-async function sendConsolidatedForReview({ report, employee, stage /* 'hr' | 'mgmt' */ }) {
+async function sendConsolidatedForReview({ report, employee, stage /* 'hr' | 'mgmt' */, pdfPath }) {
   const fromName  = process.env.SMTP_FROM_NAME  || 'Metfraa Expense Portal';
   const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
   if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
 
   const to = stage === 'hr' ? hrReviewer() : mgmtReviewer();
+  // CC admin@ (HR) on the mgmt review email so HR has visibility that
+  // Arasu received his copy. Not needed on the HR stage email since HR
+  // IS the recipient there.
+  const cc = stage === 'mgmt' ? hrReviewer() : null;
   const stageLabel = stage === 'hr' ? 'HR VERIFICATION' : 'MANAGEMENT APPROVAL';
   const stageMsg   = stage === 'hr'
     ? 'A new consolidated report is ready for HR verification.'
-    : 'HR has verified this consolidated report. It now needs management approval before it can be sent to accounts.';
+    : 'HR has verified this consolidated report. It now needs management approval before it can be sent to accounts. The full report is attached, and you can also open it in the portal to approve or reject with a note.';
 
   const portalUrl = process.env.APP_URL || '';
   const reviewUrl = portalUrl ? `${portalUrl}/app.html?admin=consolidated&open=${report.id}` : '';
@@ -397,13 +401,44 @@ async function sendConsolidatedForReview({ report, employee, stage /* 'hr' | 'mg
 </body></html>
   `.trim();
 
-  const info = await getTransporter().sendMail({
+  const mailOpts = {
     from: `"${fromName}" <${fromEmail}>`,
     to,
     subject,
     html,
-  });
-  return { messageId: info.messageId, recipients: [to] };
+  };
+  if (cc) mailOpts.cc = cc;
+
+  // Attach the PDF for the mgmt-review stage so Arasu can review in his
+  // mail client without logging into the portal. HR stage doesn't get
+  // one — HR is already in the portal doing the pending-approvals work.
+  if (stage === 'mgmt') {
+    const fsMod = require('fs');
+    if (!pdfPath) {
+      throw new Error('management review email skipped: no pdf_path on the consolidated report. Regenerate the report and try again.');
+    }
+    if (!fsMod.existsSync(pdfPath)) {
+      throw new Error(`management review email skipped: PDF file not found on disk at ${pdfPath}. Click Regenerate PDF on the row and try again.`);
+    }
+    try {
+      const stat = fsMod.statSync(pdfPath);
+      if (stat.size === 0) {
+        throw new Error(`management review email skipped: PDF file at ${pdfPath} is 0 bytes.`);
+      }
+    } catch (e) {
+      if (e.message && e.message.includes('management review email skipped')) throw e;
+      throw new Error(`management review email skipped: could not stat PDF file at ${pdfPath}: ${e.message}`);
+    }
+    const safeName = String(employee.name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_');
+    mailOpts.attachments = [{
+      filename: `${report.period}_${safeName}_consolidated.pdf`,
+      path: pdfPath,
+      contentType: 'application/pdf',
+    }];
+  }
+
+  const info = await getTransporter().sendMail(mailOpts);
+  return { messageId: info.messageId, recipients: [to, cc].filter(Boolean) };
 }
 
 // Final email to accounts@ with the approved PDF attached + admin@ CCd.

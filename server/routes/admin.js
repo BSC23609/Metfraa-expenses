@@ -1307,7 +1307,7 @@ router.post('/consolidated/:id/resend-email', requireAdmin, async (req, res) => 
     const { sendConsolidatedForReview, sendConsolidatedToAccounts } = require('../services/email');
     const emp = { id: r.employee_id, name: r.employee_name, email: r.employee_email, code: r.employee_code };
     let result;
-    if (r.status === 'pending_mgmt')       result = await sendConsolidatedForReview({ report: r, employee: emp, stage: 'mgmt' });
+    if (r.status === 'pending_mgmt')       result = await sendConsolidatedForReview({ report: r, employee: emp, stage: 'mgmt', pdfPath: r.pdf_path });
     else if (r.status === 'approved')      result = await sendConsolidatedToAccounts({ report: r, employee: emp, pdfPath: r.pdf_path });
     else return res.status(400).json({ error: `Nothing to resend for status '${r.status}'` });
 

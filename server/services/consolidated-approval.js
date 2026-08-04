@@ -126,10 +126,13 @@ async function sendForApproval(employeeId, period, actorEmail) {
     // signature visual (row has the data).
   }
 
-  // 7) Email arasu@ (CC admin@)
+  // 7) Email arasu@ (CC admin@) with the signed PDF attached
   let emailErr = null;
   try {
-    await sendConsolidatedForReview({ report: signedReport, employee, stage: 'mgmt' });
+    await sendConsolidatedForReview({
+      report: signedReport, employee, stage: 'mgmt',
+      pdfPath: signedReport.pdf_path,
+    });
   } catch (e) {
     emailErr = e.message || String(e);
     console.error(`[sendForApproval] arasu email failed:`, e);
