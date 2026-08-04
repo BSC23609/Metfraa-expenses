@@ -4441,7 +4441,8 @@
         body: JSON.stringify({ employee_id: row.employee_id, period }),
       });
       if (res.email_ok === false) {
-        toast('Report generated and sent to Arasu, but the email couldn\'t be sent. Use "Resend" on the row.', 'success');
+        const detail = res.email_error ? ' Error: ' + res.email_error : '';
+        toast('Report generated and status advanced, but the arasu@ email did NOT go out.' + detail + ' Check SMTP config on Render or use "Resend" on the row.', 'error');
       } else {
         toast('Sent to Arasu for final approval', 'success');
       }
@@ -4489,6 +4490,13 @@
     backdrop = document.createElement('div');
     backdrop.id = 'conReviewBackdrop';
     backdrop.className = 'modal-backdrop';
+    // Force a lower z-index than the shared confirm/prompt modals (which
+    // sit at z-index 300). The Approve / Reject / Recall / Reopen actions
+    // in the review bar all open a confirmModal on top of the review; if
+    // both live at z-index 300 the confirm renders BEHIND the review pane
+    // (because this backdrop is appended later in the DOM) and the button
+    // silently appears dead.
+    backdrop.style.zIndex = '250';
     backdrop.innerHTML = `
       <div class="modal" id="conReviewModal" style="max-width:1100px;width:95vw;height:90vh;display:flex;flex-direction:column;padding:0;">
         <div style="padding:16px 20px;border-bottom:1px solid var(--bsg-line);">
@@ -4525,7 +4533,8 @@
     try {
       const res = await api(`/api/admin/consolidated/${report.id}/approve-mgmt`, { method: 'POST' });
       if (res.email_ok === false) {
-        toast('Approved, but the accounts@ email couldn\'t be sent. Use "Resend" from the row.', 'success');
+        const detail = res.email_error ? ' Error: ' + res.email_error : '';
+        toast('Approved, but the accounts@ email did NOT go out.' + detail + ' Check SMTP config on Render or use "Resend" from the row.', 'error');
       } else {
         toast('Approved and sent to Accounts', 'success');
       }
@@ -4575,6 +4584,103 @@
       toast('Sent', 'success');
     } catch (err) {
       toast(err.message || 'Resend failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // SMTP diagnostics. Runs .verify() against the configured server, shows
+  // the results in a modal, and lets HR send a test message to any email
+  // to confirm the receiving side isn't the problem.
+  async function runSmtpDiagnostics() {
+    showLoading('Checking SMTP…');
+    let diagnostics;
+    try {
+      diagnostics = await api('/api/admin/smtp-test');
+    } catch (err) {
+      hideLoading();
+      toast(err.message || 'Diagnostics failed', 'error');
+      return;
+    }
+    hideLoading();
+    showSmtpDiagnosticsModal(diagnostics);
+  }
+
+  function showSmtpDiagnosticsModal(diagnostics) {
+    let backdrop = $('#smtpDiagBackdrop');
+    if (!backdrop) {
+      backdrop = document.createElement('div');
+      backdrop.id = 'smtpDiagBackdrop';
+      backdrop.className = 'modal-backdrop';
+      backdrop.style.zIndex = '350';
+      backdrop.innerHTML = `
+        <div class="modal" id="smtpDiagModal" style="max-width:560px;">
+          <h3>SMTP Diagnostics</h3>
+          <div id="smtpDiagBody"></div>
+          <div style="border-top:1px solid var(--bsg-line);margin-top:16px;padding-top:16px;">
+            <label style="font-size:12px;font-weight:600;">Send a test message to</label>
+            <input type="email" id="smtpTestTo" placeholder="you@example.com" style="width:100%;font-size:14px;padding:10px 12px;border:1px solid var(--bsg-line);border-radius:3px;margin-top:6px;" />
+            <div style="font-size:11px;color:var(--bsg-muted);margin-top:6px;">If the test lands in your inbox (or spam), SMTP is working. If nothing arrives even in spam, the recipient's mail server is dropping it silently.</div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-ghost" id="smtpDiagClose">Close</button>
+            <button class="btn btn-submit" id="smtpDiagSend">Send test</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(backdrop);
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.classList.remove('show'); });
+      $('#smtpDiagClose').addEventListener('click', () => backdrop.classList.remove('show'));
+      $('#smtpDiagSend').addEventListener('click', sendSmtpTest);
+    }
+    // Render the diagnostic report
+    const body = $('#smtpDiagBody');
+    body.innerHTML = '';
+    if (diagnostics.ok) {
+      body.appendChild(el('div', {
+        style: 'padding:12px 16px;background:#ecfdf5;border-left:4px solid #059669;border-radius:3px;font-size:13px;color:#065f46;font-weight:600;'
+      }, '✓ SMTP connection + authentication OK'));
+    } else {
+      body.appendChild(el('div', {
+        style: 'padding:12px 16px;background:#fef2f2;border-left:4px solid #dc2626;border-radius:3px;font-size:13px;color:#991b1b;font-weight:600;'
+      }, '✗ ' + (diagnostics.error || 'unknown error')));
+      if (diagnostics.code) {
+        body.appendChild(el('div', {
+          style: 'font-family:monospace;font-size:11px;color:var(--bsg-muted);margin-top:6px;'
+        }, 'code: ' + diagnostics.code));
+      }
+    }
+    const config = diagnostics.config || {};
+    body.appendChild(el('div', { style: 'margin-top:14px;font-size:12px;color:var(--bsg-muted);' }, 'Current config:'));
+    const dl = el('dl', { style: 'display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12px;font-family:monospace;margin-top:6px;' });
+    const kv = (k, v) => {
+      dl.appendChild(el('dt', { style: 'color:var(--bsg-muted);' }, k));
+      dl.appendChild(el('dd', { style: 'margin:0;color:var(--bsg-ink);' }, v == null ? '(not set)' : String(v)));
+    };
+    kv('SMTP_HOST',       config.host);
+    kv('SMTP_PORT',       config.port);
+    kv('SMTP_SECURE',     config.secure);
+    kv('SMTP_USER',       config.user);
+    kv('SMTP_PASS',       config.pass_set ? '(set)' : '(not set)');
+    kv('SMTP_FROM_NAME',  config.from_name);
+    kv('SMTP_FROM_EMAIL', config.from_email);
+    body.appendChild(dl);
+    backdrop.classList.add('show');
+  }
+
+  async function sendSmtpTest() {
+    const to = $('#smtpTestTo').value.trim();
+    if (!to || !/^[^@\s]+@[^@\s]+$/.test(to)) {
+      toast('Enter a valid recipient email.', 'error');
+      return;
+    }
+    showLoading('Sending test message…');
+    try {
+      const res = await api('/api/admin/smtp-test/send', {
+        method: 'POST',
+        body: JSON.stringify({ to }),
+      });
+      toast(`Test sent · SMTP accepted: ${(res.accepted || []).length} · rejected: ${(res.rejected || []).length}. Check the inbox (and spam folder) at ${to}.`, 'success');
+    } catch (err) {
+      toast(err.message || 'Test failed', 'error');
     } finally { hideLoading(); }
   }
 
@@ -4896,6 +5002,7 @@
     const period = ($('#conMonth').value || '').trim();
     openOvrModal({ period, scope: 'global' });
   });
+  $('#conSmtpBtn')     && $('#conSmtpBtn').addEventListener('click', runSmtpDiagnostics);
 
   boot();
 })();

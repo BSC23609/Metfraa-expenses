@@ -1271,13 +1271,66 @@ router.post('/consolidated/:id/resend-email', requireAdmin, async (req, res) => 
     if (!r) return res.status(404).json({ error: 'Not found' });
     const { sendConsolidatedForReview, sendConsolidatedToAccounts } = require('../services/email');
     const emp = { id: r.employee_id, name: r.employee_name, email: r.employee_email, code: r.employee_code };
-    if (r.status === 'pending_mgmt')       await sendConsolidatedForReview({ report: r, employee: emp, stage: 'mgmt' });
-    else if (r.status === 'approved')      await sendConsolidatedToAccounts({ report: r, employee: emp, pdfPath: r.pdf_path });
+    let result;
+    if (r.status === 'pending_mgmt')       result = await sendConsolidatedForReview({ report: r, employee: emp, stage: 'mgmt' });
+    else if (r.status === 'approved')      result = await sendConsolidatedToAccounts({ report: r, employee: emp, pdfPath: r.pdf_path });
     else return res.status(400).json({ error: `Nothing to resend for status '${r.status}'` });
-    res.json({ ok: true });
+
+    // Distinguish "email actually sent" from "email skipped because SMTP
+    // isn't configured". The latter LOOKS like success but no message
+    // actually went out — surface it so HR knows to check env vars.
+    if (result && result.skipped) {
+      return res.status(500).json({
+        error: `Email not sent — reason: ${result.reason}. Check the SMTP_HOST / SMTP_USER / SMTP_PASS env vars on Render.`,
+      });
+    }
+    res.json({ ok: true, message_id: result && result.messageId, recipients: result && result.recipients });
   } catch (err) {
     console.error('[resend]', err);
+    // Surface the actual error to HR so they can diagnose (e.g. SMTP
+    // authentication failed, connection refused, etc).
     res.status(500).json({ error: err.message || 'Resend failed' });
+  }
+});
+
+// ---- SMTP diagnostics ----------------------------------------------
+//
+//   GET  /api/admin/smtp-test           — reports env-var health + does
+//                                         a connection + AUTH handshake
+//                                         via nodemailer.verify().
+//   POST /api/admin/smtp-test/send      — {to: string} sends a real test
+//                                         message so HR can confirm the
+//                                         recipient side isn't filtering.
+//
+// -------------------------------------------------------------------
+router.get('/smtp-test', requireAdmin, async (req, res) => {
+  try {
+    const { diagnoseSmtp } = require('../services/email');
+    const result = await diagnoseSmtp();
+    res.json(result);
+  } catch (err) {
+    console.error('[smtp-test]', err);
+    res.status(500).json({ ok: false, error: err.message || 'diagnostics failed' });
+  }
+});
+router.post('/smtp-test/send', requireAdmin, async (req, res) => {
+  try {
+    const to = ((req.body && req.body.to) || '').trim();
+    if (!to || !/^[^@\s]+@[^@\s]+$/.test(to)) {
+      return res.status(400).json({ error: 'Provide a valid recipient email in `to`.' });
+    }
+    const { sendSmtpTestMessage } = require('../services/email');
+    const result = await sendSmtpTestMessage(to);
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'SMTP_TEST_SEND',
+      target_type: 'system', target_id: 0,
+      meta_json: JSON.stringify({ to, ...result }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[smtp-test send]', err);
+    res.status(500).json({ ok: false, error: err.message || 'send failed', code: err.code || null });
   }
 });
 

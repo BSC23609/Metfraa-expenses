@@ -149,7 +149,7 @@ async function sendForApproval(employeeId, period, actorEmail) {
     ip_address: null,
   });
 
-  return { ok: true, report_id: cr.id, email_ok: !emailErr };
+  return { ok: true, report_id: cr.id, email_ok: !emailErr, email_error: emailErr };
 }
 
 // -----------------------------------------------------------------
@@ -206,7 +206,7 @@ async function approveMgmt(reportId, actorEmail) {
     ip_address: null,
   });
 
-  return { ok: true, final_status: 'approved', email_ok: !emailErr };
+  return { ok: true, final_status: 'approved', email_ok: !emailErr, email_error: emailErr };
 }
 
 // -----------------------------------------------------------------

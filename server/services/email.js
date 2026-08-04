@@ -470,7 +470,67 @@ async function sendConsolidatedToAccounts({ report, employee, pdfPath }) {
   return { messageId: info.messageId, recipients: [to, cc] };
 }
 
+// SMTP diagnostics — verify the connection is up + return a plain
+// object describing what's configured and what nodemailer says. Used
+// by the /api/admin/smtp-test endpoint so HR can see why email isn't
+// working without digging into Render logs.
+async function diagnoseSmtp() {
+  const config = {
+    host:      process.env.SMTP_HOST || null,
+    port:      parseInt(process.env.SMTP_PORT || '587', 10),
+    secure:    String(process.env.SMTP_SECURE || 'false') === 'true',
+    user:      process.env.SMTP_USER || null,
+    pass_set:  !!process.env.SMTP_PASS,
+    from_name: process.env.SMTP_FROM_NAME || null,
+    from_email:process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || null,
+  };
+
+  const missing = [];
+  if (!config.host)       missing.push('SMTP_HOST');
+  if (!config.user)       missing.push('SMTP_USER');
+  if (!config.pass_set)   missing.push('SMTP_PASS');
+  if (!config.from_email) missing.push('SMTP_FROM_EMAIL (or SMTP_USER)');
+  if (missing.length) {
+    return { ok: false, config, error: 'Missing env vars: ' + missing.join(', ') };
+  }
+
+  try {
+    // nodemailer's .verify() opens a connection and runs the EHLO / AUTH
+    // handshake without actually sending a message. This catches the
+    // three most common problems: hostname bad, port blocked, credentials
+    // rejected.
+    await getTransporter().verify();
+    return { ok: true, config, message: 'SMTP connection + authentication succeeded' };
+  } catch (err) {
+    return {
+      ok: false, config,
+      error: err.message || String(err),
+      code: err.code || null,
+      response: err.response || null,
+    };
+  }
+}
+
+// Send a plain test message — useful when .verify() passes but real
+// mail still isn't arriving (usually a filtering / spam issue on the
+// recipient side).
+async function sendSmtpTestMessage(to) {
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Metfraa Expense Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) {
+    throw new Error('SMTP not configured — cannot send test message.');
+  }
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to,
+    subject: '[Metfraa Portal] SMTP test — please ignore',
+    text: `This is an SMTP test message sent from the Metfraa Expense Portal at ${new Date().toISOString()}. If you received this, SMTP is working correctly.`,
+  });
+  return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, response: info.response };
+}
+
 module.exports = {
   sendSubmissionEmail, sendApprovalEmail, sendReturnedEmail, sendPaymentEmail,
   sendConsolidatedForReview, sendConsolidatedToAccounts,
+  diagnoseSmtp, sendSmtpTestMessage,
 };
