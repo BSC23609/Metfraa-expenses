@@ -257,10 +257,18 @@
       <div class="card-title">Settlement Details</div>
       <div class="field-grid">
         <div class="field">
+          <label for="settleTripEnd">Trip End Date <span class="req">*</span></label>
+          <input id="settleTripEnd" type="date" />
+          <div style="font-size:11px;color:var(--bsg-muted);margin-top:4px;">
+            The day your trip actually ended. Bills should be uploaded within 72 hours of this date — beyond that, the settlement is flagged as late.
+          </div>
+        </div>
+        <div class="field">
           <label for="settleActual">Actual Amount Spent (₹) <span class="req">*</span></label>
           <input id="settleActual" type="number" step="0.01" min="0" placeholder="0.00" />
         </div>
       </div>
+      <div id="settleLateWarning" style="display:none;"></div>
       <div class="field full">
         <label for="settleNotes">Notes (optional)</label>
         <textarea id="settleNotes" class="ti" rows="2" placeholder="Any remarks about the trip or expenses…"></textarea>

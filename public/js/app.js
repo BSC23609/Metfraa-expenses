@@ -723,7 +723,7 @@
   }
 
   function startSettle(advance) {
-    state.settling = { advance, actual_amount: '', notes: '' };
+    state.settling = { advance, actual_amount: '', notes: '', trip_end_date: '' };
     state.uploadToken = uuid();
     state.uploads = [];
     route('settleAdvance');
@@ -760,16 +760,60 @@
     // Wire inputs
     const actualInput = $('#settleActual');
     const notesInput  = $('#settleNotes');
+    const tripEndInput = $('#settleTripEnd');
     actualInput.value = state.settling.actual_amount || '';
     notesInput.value  = state.settling.notes || '';
-    actualInput.oninput = (e) => { state.settling.actual_amount = e.target.value; updateSettleDifference(); };
-    notesInput.oninput  = (e) => { state.settling.notes = e.target.value; };
+    // Prefill trip end date from the advance payload's travel_to if
+    // available and if the user hasn't entered one yet. This is a hint,
+    // not a lock — the user can change it (trip might have ended earlier
+    // or ran over).
+    if (!state.settling.trip_end_date && p.travel_to && /^\d{4}-\d{2}-\d{2}$/.test(p.travel_to)) {
+      state.settling.trip_end_date = p.travel_to;
+    }
+    tripEndInput.value = state.settling.trip_end_date || '';
+    // Trip end date can't be in the future
+    const todayISO = new Date().toISOString().slice(0, 10);
+    tripEndInput.max = todayISO;
+
+    actualInput.oninput  = (e) => { state.settling.actual_amount = e.target.value; updateSettleDifference(); };
+    notesInput.oninput   = (e) => { state.settling.notes = e.target.value; };
+    tripEndInput.oninput = (e) => { state.settling.trip_end_date = e.target.value; updateLateWarning(); };
 
     updateSettleDifference();
+    updateLateWarning();
     refreshSettleUploadList();
     bindSettleUploadZone();
 
     $('#settleSubmitBtn').onclick = submitSettlement;
+  }
+
+  // Show a live warning under the trip-end field once the user picks a
+  // date. Purely cosmetic — the actual late-settlement flag is computed
+  // server-side when the settlement is filed (same math, so the two agree).
+  function updateLateWarning() {
+    const box = $('#settleLateWarning');
+    if (!box || !state.settling) return;
+    const tripEnd = state.settling.trip_end_date;
+    if (!tripEnd || !/^\d{4}-\d{2}-\d{2}$/.test(tripEnd)) {
+      box.style.display = 'none';
+      return;
+    }
+    // Compute deadline: 23:59 IST on trip_end + 72h
+    const [y, mo, d] = tripEnd.split('-').map(Number);
+    const tripEndUtcMs = Date.UTC(y, mo - 1, d, 18, 29, 0); // 23:59 IST = 18:29 UTC
+    const deadlineUtcMs = tripEndUtcMs + 72 * 60 * 60 * 1000;
+    const nowMs = Date.now();
+    if (nowMs > deadlineUtcMs) {
+      const hoursLate = ((nowMs - deadlineUtcMs) / (60 * 60 * 1000)).toFixed(1);
+      box.style.display = 'block';
+      box.style.cssText = 'display:block;padding:12px 14px;background:#fff7ed;border-left:4px solid #d97706;border-radius:3px;margin:8px 0;font-size:12px;color:#78350f;line-height:1.5;';
+      box.innerHTML = `⚠️ <strong>Late settlement.</strong> This filing is <strong>${hoursLate} hours</strong> past the 72-hour window that started at the end of your trip. HR will still accept it, but the record will be flagged.`;
+    } else {
+      const hoursLeft = ((deadlineUtcMs - nowMs) / (60 * 60 * 1000)).toFixed(1);
+      box.style.display = 'block';
+      box.style.cssText = 'display:block;padding:10px 14px;background:#f0fdf4;border-left:4px solid #059669;border-radius:3px;margin:8px 0;font-size:12px;color:#065f46;line-height:1.5;';
+      box.innerHTML = `✓ Within the settlement window — <strong>${hoursLeft} hours</strong> remaining.`;
+    }
   }
 
   function updateSettleDifference() {
@@ -847,6 +891,15 @@
     if (!st) return;
     const actual = parseFloat(st.actual_amount);
     if (!(actual >= 0)) { toast('Actual amount spent is required.', 'error'); return; }
+    if (!st.trip_end_date || !/^\d{4}-\d{2}-\d{2}$/.test(st.trip_end_date)) {
+      toast('Trip end date is required.', 'error');
+      return;
+    }
+    // Trip end date can't be in the future
+    if (st.trip_end_date > new Date().toISOString().slice(0, 10)) {
+      toast('Trip end date cannot be in the future.', 'error');
+      return;
+    }
     if (!state.uploads.length) { toast('Attach at least one bill before submitting.', 'error'); return; }
 
     try {
@@ -856,6 +909,7 @@
         body: JSON.stringify({
           upload_token: state.uploadToken,
           actuals: { actual_amount: actual, notes: st.notes || '' },
+          trip_end_date: st.trip_end_date,
         }),
       });
       toast('Settlement filed. Awaiting admin approval.', 'success');
@@ -3136,30 +3190,41 @@
     const isPending = s.status === 'pending' || s.status === 'settlement_pending';
     const isApproved = s.status === 'approved';
     const isDraft = s.status === 'draft';
+    const isAdvanceHrVerified   = s.status === 'advance_hr_verified';
+    const isAdvanceMgmtApproved = s.status === 'advance_mgmt_approved';
     return el('div', { class: 'admin-actions' },
       el('button', { class: 'view', onclick: () => viewSubmission(s.id) }, 'View'),
-      isPending ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : 'Approve') : null,
+      isPending ? el('button', { class: 'approve', onclick: () => approveSubmission(s) }, isSettlement ? 'Approve Settlement' : (s.form_type === 'met_advance' ? 'Verify (Stage 1)' : 'Approve')) : null,
       isPending ? el('button', { class: 'reject', onclick: () => rejectSubmission(s) }, isSettlement ? 'Reject Settlement' : 'Send back') : null,
       // "Settled already" — only for fresh pending, not settlement flows.
-      // Muted styling so it doesn't compete visually with the primary Approve.
       (isPending && !isSettlement) ? el('button', {
         class: 'view',
         style: 'background:transparent;color:#6b7280;border-color:#d1d5db;',
         title: 'Money already paid outside the portal — close without generating a report',
         onclick: () => settleOfflineSubmission(s),
       }, 'Settled already') : null,
+      // Stage 2 — Arasu approves the advance
+      isAdvanceHrVerified ? el('button', {
+        class: 'approve',
+        style: 'background:#2563eb;border-color:#2563eb;',
+        title: 'Management approval — Arasu confirms the advance so Accounts can pay',
+        onclick: () => advanceMgmtApprove(s),
+      }, 'Approve advance (Stage 2)') : null,
+      // Stage 3 — Record that Accounts has paid
+      isAdvanceMgmtApproved ? el('button', {
+        class: 'approve',
+        style: 'background:#059669;border-color:#059669;',
+        title: 'Confirm Accounts has disbursed the advance — this opens the 72h settlement window',
+        onclick: () => advanceMarkPaid(s),
+      }, 'Record payment (Stage 3)') : null,
       // "Reopen" — for approved submissions that HR needs to un-approve
-      // and re-review. Server will refuse if it's already in a live
-      // consolidated report.
       isApproved ? el('button', {
         class: 'view',
         style: 'background:transparent;color:#b45309;border-color:#fcd34d;',
         title: 'Revert to pending so you can re-review this submission',
         onclick: () => unapproveSubmission(s),
       }, 'Reopen') : null,
-      // "Recall" — for sent-back submissions that HR wants back in their
-      // queue. Same amber styling as Reopen since it's semantically the
-      // same action (undo a review decision).
+      // "Recall" — for sent-back submissions that HR wants back
       isDraft ? el('button', {
         class: 'view',
         style: 'background:transparent;color:#b45309;border-color:#fcd34d;',
@@ -3477,6 +3542,67 @@
       drawPendingTable(); drawSubmissionsTable();
     } catch (err) {
       toast(err.message || 'Failed to mark settled', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // ---- Travel Advance Stage 2 & 3 handlers --------------------------
+
+  // Stage 2 — Arasu approves the advance after HR has verified it. Server
+  // will refuse if the status isn't advance_hr_verified.
+  async function advanceMgmtApprove(s) {
+    if (s.status !== 'advance_hr_verified') {
+      toast(`This advance isn't in Stage 2 (status: ${s.status}).`, 'error');
+      return;
+    }
+    const ok = await confirmModal({
+      title: 'Approve advance (Stage 2)?',
+      body: `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. This confirms the advance and emails Accounts (accounts@metfraa.com, CC admin@metfraa.com) with the PDF attached so they can disburse.`,
+      confirmText: 'Approve',
+    });
+    if (!ok) return;
+    showLoading('Approving advance…');
+    try {
+      const res = await api(`/api/admin/submissions/${s.id}/advance-mgmt-approve`, { method: 'POST' });
+      if (res.email_ok === false) {
+        const detail = res.email_error ? ' Error: ' + res.email_error : '';
+        toast('Approved, but the accounts@ email did NOT go out.' + detail, 'error');
+      } else {
+        toast('Advance approved · Accounts notified for payment', 'success');
+      }
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Approval failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // Stage 3 — HR records that Accounts has paid the advance. This flips
+  // the status to advance_approved (the pre-existing "advance is open"
+  // state) and emails the employee with the 72h settlement reminder.
+  async function advanceMarkPaid(s) {
+    if (s.status !== 'advance_mgmt_approved') {
+      toast(`This advance isn't in Stage 3 (status: ${s.status}).`, 'error');
+      return;
+    }
+    const ok = await confirmModal({
+      title: 'Record advance payment (Stage 3)?',
+      body: `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. Confirm Accounts has disbursed this advance. The employee will be emailed a reminder to upload bills within 72 hours after their trip ends.`,
+      confirmText: 'Record payment',
+    });
+    if (!ok) return;
+    showLoading('Recording payment…');
+    try {
+      const res = await api(`/api/admin/submissions/${s.id}/advance-mark-paid`, { method: 'POST' });
+      if (res.email_ok === false) {
+        const detail = res.email_error ? ' Error: ' + res.email_error : '';
+        toast('Payment recorded, but employee reminder email did NOT go out.' + detail, 'error');
+      } else {
+        toast('Payment recorded · Employee notified · 72h window started', 'success');
+      }
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Mark-paid failed', 'error');
     } finally { hideLoading(); }
   }
 
@@ -4299,7 +4425,10 @@
     let readyCount = 0;
     for (const r of rows) {
       const cr = r.consolidated_report;
+      // Anything blocking the "Send for final approval" click:
       const pendingLike = (r.pending_count || 0) + (r.draft_count || 0)
+                       + (r.advance_hr_verified_count || 0)
+                       + (r.advance_mgmt_approved_count || 0)
                        + (r.advance_approved_count || 0);
       const rejectedInMonth = r.rejected_count || 0;
       const approvedLike = (r.approved_count || 0) + (r.settled_count || 0);
@@ -4312,13 +4441,15 @@
         style: 'padding:2px 8px;font-size:10px;',
       }, `${n} ${label}`) : null;
       const addIf = (child) => { if (child) chips.appendChild(child); };
-      addIf(chip(r.pending_count,          'pending',   'pending'));
-      addIf(chip(r.approved_count,         'approved',  'approved'));
-      addIf(chip(r.settled_count,          'settled',   'approved'));
-      addIf(chip(r.settled_offline_count,  'offline',   'settled_offline'));
-      addIf(chip(r.advance_approved_count, 'advance',   'pending'));
-      addIf(chip(r.draft_count,            'draft',     'draft'));
-      addIf(chip(r.rejected_count,         'rejected',  'rejected'));
+      addIf(chip(r.pending_count,                    'pending',        'pending'));
+      addIf(chip(r.approved_count,                   'approved',       'approved'));
+      addIf(chip(r.settled_count,                    'settled',        'approved'));
+      addIf(chip(r.settled_offline_count,            'offline',        'settled_offline'));
+      addIf(chip(r.advance_hr_verified_count,        'adv awaiting Arasu',    'advance_hr_verified'));
+      addIf(chip(r.advance_mgmt_approved_count,      'adv awaiting Accounts', 'advance_mgmt_approved'));
+      addIf(chip(r.advance_approved_count,           'adv paid · awaiting settlement', 'advance_approved'));
+      addIf(chip(r.draft_count,                      'draft',          'draft'));
+      addIf(chip(r.rejected_count,                   'rejected',       'rejected'));
       const totalLine = el('div', { style: 'font-size:11px;color:var(--bsg-muted);margin-top:4px;' },
         `${r.total} total`);
 
@@ -4334,12 +4465,12 @@
         statusCell = el('span', { class: 'status-pill approved' }, '✓ unlocked · ready to send');
         readyCount++;
       } else if (pendingLike > 0) {
-        // Locked state — some HR review still to do. Read as a lock so
-        // the visual clearly communicates "not touchable yet".
         const blockers = [];
-        if (r.pending_count > 0)          blockers.push(`${r.pending_count} pending`);
-        if (r.draft_count > 0)            blockers.push(`${r.draft_count} draft`);
-        if (r.advance_approved_count > 0) blockers.push(`${r.advance_approved_count} advance`);
+        if (r.pending_count > 0)                   blockers.push(`${r.pending_count} pending`);
+        if (r.draft_count > 0)                     blockers.push(`${r.draft_count} draft`);
+        if (r.advance_hr_verified_count > 0)       blockers.push(`${r.advance_hr_verified_count} adv → Arasu`);
+        if (r.advance_mgmt_approved_count > 0)     blockers.push(`${r.advance_mgmt_approved_count} adv → Accounts`);
+        if (r.advance_approved_count > 0)          blockers.push(`${r.advance_approved_count} adv → settlement`);
         statusCell = el('span', { class: 'status-pill pending' }, `🔒 locked · ${blockers.join(' · ')}`);
       } else if (rejectedInMonth > 0 && approvedLike === 0) {
         statusCell = el('span', { class: 'status-pill rejected' }, '🔒 locked · all rejected');

@@ -596,8 +596,211 @@ async function sendSmtpTestMessage(to) {
   return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, response: info.response };
 }
 
+// -----------------------------------------------------------------
+// Travel Advance workflow emails (Turn 4). Three functions in the
+// pre-trip chain, called from admin routes:
+//
+//   sendAdvanceForMgmtApproval → arasu@ (CC admin@), attach advance PDF
+//     Called when HR verifies. Asks Arasu to approve so payment can
+//     go out.
+//
+//   sendAdvanceToAccounts → accounts@ (CC admin@), attach approved PDF
+//     Called when Arasu approves. Asks Accounts to disburse the amount
+//     and record payment in the portal.
+//
+//   sendAdvancePaidToEmployee → employee, no attachment
+//     Called when Accounts marks payment. Tells the employee the money's
+//     on the way and reminds them to upload bills within 72h of trip
+//     completion.
+//
+// Same fail-loud contract as the consolidated emails: throws with a
+// specific error when the PDF is missing on disk, so HR sees a clear
+// message and can Regenerate.
+// -----------------------------------------------------------------
+
+function ensurePdfOrThrow(pdfPath, label) {
+  const fsMod = require('fs');
+  if (!pdfPath) throw new Error(`${label}: no pdf_path recorded on the submission. Regenerate the report and try again.`);
+  if (!fsMod.existsSync(pdfPath)) throw new Error(`${label}: PDF file not found on disk at ${pdfPath}.`);
+  const stat = fsMod.statSync(pdfPath);
+  if (stat.size === 0) throw new Error(`${label}: PDF file at ${pdfPath} is 0 bytes.`);
+}
+
+async function sendAdvanceForMgmtApproval({ submission, employee, pdfPath }) {
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Metfraa Expense Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+  ensurePdfOrThrow(pdfPath, 'advance mgmt-review email skipped');
+
+  const payload = safeParse(submission.payload_json);
+  const purpose = payload.purpose || payload.reason || '';
+  const dates   = payload.trip_dates || payload.dates || '';
+  const dest    = payload.destination || payload.location || '';
+
+  const to = mgmtReviewer();
+  const cc = hrReviewer();
+  const subject = `[Metfraa · Advance approval] ${employee.name} · INR ${fmt(submission.total_amount)} · ${submission.reference}`;
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #2563eb; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">Metfraa · Expense Portal</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">Travel Advance · Management Approval</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">HR has verified a travel advance request. It now needs your approval so Accounts can release the payment before the trip.</p>
+
+  <div style="background: #f6f8fa; border-left: 4px solid #2563eb; padding: 18px 22px; margin: 22px 0; border-radius: 3px;">
+    <div style="font-size: 16px; color: #0d1421; font-weight: 700;">${employee.name}</div>
+    <div style="font-size: 12px; color: #6b7689; margin-top: 2px;">${employee.email || ''}</div>
+    <table style="width: 100%; margin-top: 14px; font-size: 13px; border-collapse: collapse;">
+      <tr><td style="color:#6b7689;padding:3px 0;">Reference</td><td style="text-align:right;font-family:monospace;font-weight:600;">${submission.reference}</td></tr>
+      ${dest ?    `<tr><td style="color:#6b7689;padding:3px 0;">Destination</td><td style="text-align:right;font-weight:600;">${dest}</td></tr>` : ''}
+      ${dates ?   `<tr><td style="color:#6b7689;padding:3px 0;">Dates</td><td style="text-align:right;font-weight:600;">${dates}</td></tr>` : ''}
+      ${purpose ? `<tr><td style="color:#6b7689;padding:3px 0;">Purpose</td><td style="text-align:right;font-weight:600;">${purpose}</td></tr>` : ''}
+      <tr><td style="color:#6b7689;padding:3px 0;">Advance requested</td><td style="text-align:right;font-weight:700;font-size:15px;">INR ${fmt(submission.total_amount)}</td></tr>
+    </table>
+  </div>
+
+  <p style="font-size: 13px; color: #4b5563; line-height: 1.6;">
+    The full request details are in the attached PDF. Reply "APPROVED" to move it to Accounts for payment, or reply with what needs to change if the amount or purpose looks off.
+  </p>
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    METFRAA · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const safeName = String(employee.name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_');
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to, cc, subject, html,
+    attachments: [{
+      filename: `${submission.reference}_${safeName}_advance.pdf`,
+      path: pdfPath, contentType: 'application/pdf',
+    }],
+  });
+  return { messageId: info.messageId, recipients: [to, cc] };
+}
+
+async function sendAdvanceToAccounts({ submission, employee, pdfPath }) {
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Metfraa Expense Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+  ensurePdfOrThrow(pdfPath, 'advance accounts email skipped');
+
+  const payload = safeParse(submission.payload_json);
+  const purpose = payload.purpose || payload.reason || '';
+  const dates   = payload.trip_dates || payload.dates || '';
+  const dest    = payload.destination || payload.location || '';
+
+  const to = accountsInbox();
+  const cc = hrReviewer();
+  const subject = `[Metfraa · Payment needed] ${employee.name} · INR ${fmt(submission.total_amount)} · ${submission.reference}`;
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #059669; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">Metfraa · Expense Portal</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">Travel Advance · Ready for Payment</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">HR verified and management has approved this travel advance. Please disburse the amount below and mark it paid in the portal so the employee can proceed.</p>
+
+  <div style="background: #f0fdf4; border-left: 4px solid #059669; padding: 18px 22px; margin: 22px 0; border-radius: 3px;">
+    <div style="font-size: 16px; color: #0d1421; font-weight: 700;">${employee.name}</div>
+    <div style="font-size: 12px; color: #6b7689; margin-top: 2px;">${employee.email || ''}${employee.employee_code ? ' · ' + employee.employee_code : ''}</div>
+    <table style="width: 100%; margin-top: 14px; font-size: 13px; border-collapse: collapse;">
+      <tr><td style="color:#6b7689;padding:3px 0;">Reference</td><td style="text-align:right;font-family:monospace;font-weight:600;">${submission.reference}</td></tr>
+      ${dest ?    `<tr><td style="color:#6b7689;padding:3px 0;">Destination</td><td style="text-align:right;font-weight:600;">${dest}</td></tr>` : ''}
+      ${dates ?   `<tr><td style="color:#6b7689;padding:3px 0;">Dates</td><td style="text-align:right;font-weight:600;">${dates}</td></tr>` : ''}
+      ${purpose ? `<tr><td style="color:#6b7689;padding:3px 0;">Purpose</td><td style="text-align:right;font-weight:600;">${purpose}</td></tr>` : ''}
+      <tr><td style="color:#6b7689;padding:3px 0;">Amount to disburse</td><td style="text-align:right;font-weight:700;font-size:17px;color:#059669;">INR ${fmt(submission.total_amount)}</td></tr>
+    </table>
+  </div>
+
+  <p style="font-size: 13px; color: #4b5563; line-height: 1.6;">
+    Once the money has left, please tell HR so they can mark the advance PAID in the portal. That closes the pre-trip loop and starts the 72-hour post-trip settlement window for the employee.
+  </p>
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    METFRAA · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const safeName = String(employee.name || 'employee').replace(/[^a-zA-Z0-9_-]+/g, '_');
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to, cc, subject, html,
+    attachments: [{
+      filename: `${submission.reference}_${safeName}_advance_approved.pdf`,
+      path: pdfPath, contentType: 'application/pdf',
+    }],
+  });
+  return { messageId: info.messageId, recipients: [to, cc] };
+}
+
+async function sendAdvancePaidToEmployee({ submission, employee }) {
+  const fromName  = process.env.SMTP_FROM_NAME  || 'Metfraa Expense Portal';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  if (!fromEmail || !process.env.SMTP_HOST) return { skipped: true, reason: 'smtp-not-configured' };
+  if (!employee.email) return { skipped: true, reason: 'no-employee-email' };
+
+  const subject = `[Metfraa] Your travel advance has been disbursed · ${submission.reference}`;
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: Arial, sans-serif; color: #1a2332; max-width: 640px; margin: 0 auto; padding: 24px;">
+  <div style="border-top: 4px solid #059669; padding-top: 16px;">
+    <div style="font-family: monospace; font-size: 11px; letter-spacing: 0.2em; color: #6b7689; text-transform: uppercase;">Metfraa · Expense Portal</div>
+    <h2 style="margin: 8px 0 0; font-size: 22px; color: #0d1421; text-transform: uppercase;">Your Travel Advance · Disbursed</h2>
+  </div>
+
+  <p style="font-size: 14px; line-height: 1.6;">Hi ${employee.name.split(' ')[0]},</p>
+
+  <p style="font-size: 14px; line-height: 1.6;">Your travel advance of <strong>INR ${fmt(submission.total_amount)}</strong> (reference <span style="font-family:monospace;">${submission.reference}</span>) has been approved and payment has been released by Accounts. Have a good trip.</p>
+
+  <div style="background: #fff7ed; border-left: 4px solid #d97706; padding: 16px 20px; margin: 22px 0; border-radius: 3px;">
+    <div style="font-weight: 700; color: #78350f; font-size: 14px;">⚠️ 72-hour settlement window</div>
+    <p style="font-size: 13px; color: #78350f; margin: 6px 0 0; line-height: 1.6;">
+      Once your trip ends, you have <strong>72 hours</strong> to log in to the portal, open this advance, and upload your bills. Any differential between the advance and what you actually spent will be adjusted in your next monthly reimbursement.
+    </p>
+    <p style="font-size: 12px; color: #92400e; margin: 8px 0 0; line-height: 1.6;">
+      Late settlements are still accepted, but they get flagged on the record and in HR's monthly report — so please try to file within the window.
+    </p>
+  </div>
+
+  <hr style="border: none; border-top: 1px dashed #d6dde6; margin: 32px 0 16px;" />
+  <p style="font-size: 11px; color: #6b7689; font-family: monospace; letter-spacing: 0.05em;">
+    METFRAA · EXPENSE PORTAL · AUTOMATED MESSAGE
+  </p>
+</body></html>
+  `.trim();
+
+  const info = await getTransporter().sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to: employee.email,
+    subject, html,
+  });
+  return { messageId: info.messageId, recipients: [employee.email] };
+}
+
+// Small helper — some places pass payload as string vs object.
+function safeParse(s) {
+  if (!s) return {};
+  if (typeof s === 'object') return s;
+  try { return JSON.parse(s); } catch (_) { return {}; }
+}
+
 module.exports = {
   sendSubmissionEmail, sendApprovalEmail, sendReturnedEmail, sendPaymentEmail,
   sendConsolidatedForReview, sendConsolidatedToAccounts,
+  sendAdvanceForMgmtApproval, sendAdvanceToAccounts, sendAdvancePaidToEmployee,
   diagnoseSmtp, sendSmtpTestMessage,
 };

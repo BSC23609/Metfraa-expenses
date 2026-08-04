@@ -51,6 +51,19 @@ async function buildReportPdf(sub, { draft = true } = {}) {
       settlement_reviewed_by: sub.settlement_reviewed_by,
       settlement_reviewed_at: sub.settlement_reviewed_at,
       settlement_note: sub.settlement_note,
+      // Turn 4 — three-stage advance signatures shown on the PDF
+      advance_stage: sub.advance_stage,
+      advance_hr_verified_by: sub.advance_hr_verified_by,
+      advance_hr_verified_at: sub.advance_hr_verified_at,
+      advance_mgmt_approved_by: sub.advance_mgmt_approved_by,
+      advance_mgmt_approved_at: sub.advance_mgmt_approved_at,
+      advance_paid_by: sub.advance_paid_by,
+      advance_paid_at: sub.advance_paid_at,
+      // Late-settlement flag for the settlement banner
+      trip_end_date: sub.trip_end_date,
+      late_settlement: sub.late_settlement,
+      late_hours: sub.late_hours,
+      differential_amount: sub.differential_amount,
     },
     employee: {
       name: sub.employee_name, email: sub.employee_email, employee_code: sub.employee_code,

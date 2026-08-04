@@ -498,10 +498,31 @@ router.post('/:id/settle', requireAuth, async (req, res) => {
       return res.status(400).json({ error: `Cannot settle from status '${sub.status}'.` });
     }
 
-    const { upload_token, actuals } = req.body || {};
+    const { upload_token, actuals, trip_end_date } = req.body || {};
     const actualAmount = parseFloat(actuals && actuals.actual_amount);
     if (!(actualAmount >= 0)) {
       return res.status(400).json({ error: 'Actual amount spent is required (₹0 or more).' });
+    }
+    // TURN 4: Employee provides the trip's end date on settlement. Used
+    // for the 72-hour rule — if the settlement is filed more than 72h
+    // after trip_end_date, we soft-flag it as a late settlement (no
+    // hard block, just a badge). If they don't provide one, we can't
+    // compute lateness, so we leave the flag off.
+    let tripEndDate = null;
+    let lateSettlement = 0;
+    let lateHours = null;
+    if (trip_end_date && /^\d{4}-\d{2}-\d{2}$/.test(String(trip_end_date))) {
+      tripEndDate = String(trip_end_date);
+      // Deadline: trip_end_date at 23:59 IST + 72 hours
+      const [y, mo, d] = tripEndDate.split('-').map(Number);
+      // IST midnight-end-of-day → UTC = 18:29 (23:59 IST - 5:30)
+      const tripEndUtcMs = Date.UTC(y, mo - 1, d, 18, 29, 0);
+      const deadlineUtcMs = tripEndUtcMs + 72 * 60 * 60 * 1000;
+      const nowMs = Date.now();
+      if (nowMs > deadlineUtcMs) {
+        lateSettlement = 1;
+        lateHours = +((nowMs - deadlineUtcMs) / (60 * 60 * 1000)).toFixed(1);
+      }
     }
 
     // 1) Claim pending uploads as attachments on this submission.
@@ -528,6 +549,9 @@ router.post('/:id/settle', requireAuth, async (req, res) => {
           advance_amount: sub.total_amount,
           difference: +(actualAmount - sub.total_amount).toFixed(2), // +ve = company owes more, -ve = employee returns
         }),
+        trip_end_date: tripEndDate,
+        late_settlement: lateSettlement,
+        late_hours: lateHours,
       });
       if (upload_token) stmts.deletePendingByToken.run(upload_token);
     });

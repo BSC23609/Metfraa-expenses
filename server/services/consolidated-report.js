@@ -173,13 +173,20 @@ function drawCover({ page, font, fontBold, employee, period, total, submissionCo
     x: MARGIN, y: height - 243, size: 9, font, color: MUTED,
   });
 
-  // Total block on the right
-  const totalLabel = 'TOTAL AMOUNT';
-  const totalStr = `INR ${fmtInr(total)}`;
+  // Total block on the right. If the total is negative (settlement
+  // shortfalls exceed reimbursements), we flip the label to "PAYABLE
+  // TO COMPANY" and draw the amount unsigned (with a small arrow). This
+  // makes the direction of the money obvious to Arasu and Accounts
+  // without them having to parse the sign.
+  const totalIsNegative = Number(total) < 0;
+  const displayTotal = Math.abs(Number(total) || 0);
+  const totalLabel = totalIsNegative ? 'PAYABLE TO COMPANY' : 'PAYABLE TO EMPLOYEE';
+  const totalStr = `INR ${fmtInr(displayTotal)}`;
+  const totalColor = totalIsNegative ? rgb(0.72, 0.16, 0.16) : INK;
   const totalX = width - MARGIN - 240;
   page.drawText(totalLabel, { x: totalX, y: height - 205, size: 8, font: fontBold, color: MUTED });
-  page.drawText(totalStr, { x: totalX, y: height - 235, size: 22, font: fontBold, color: INK });
-  page.drawText(`${submissionCount} claim${submissionCount === 1 ? '' : 's'}`, {
+  page.drawText(totalStr, { x: totalX, y: height - 235, size: 22, font: fontBold, color: totalColor });
+  page.drawText(`${submissionCount} claim${submissionCount === 1 ? '' : 's'}${totalIsNegative ? '  ·  net owed back' : ''}`, {
     x: totalX, y: height - 253, size: 9, font, color: MUTED,
   });
 
@@ -293,18 +300,60 @@ function drawTocSkeleton({ doc, font, fontBold, employee, period, submissions })
   for (let i = 0; i < submissions.length; i++) {
     const s = submissions[i];
     const idx = (i + 1).toString().padStart(2, '0');
-    const amount = s.status === 'settled' && s.actuals_json
-      ? (() => { try { return parseFloat(JSON.parse(s.actuals_json).actual_amount) || 0; } catch (_) { return 0; } })()
-      : (parseFloat(s.total_amount) || 0);
+    const isSettledAdvance = s.status === 'settled' && s.form_type === 'met_advance';
+    const isSettled        = s.status === 'settled';
+
+    // What number goes in the AMOUNT column depends on the row type.
+    //   Regular approved claim  → total_amount (full reimbursement)
+    //   Settled advance         → differential_amount (signed; can be
+    //                              negative when the employee spent
+    //                              less than the advance)
+    //   Legacy settled (non-adv) → actual_amount from actuals_json
+    let amount, amountPrefix = 'INR ';
+    if (isSettledAdvance) {
+      amount = Number(s.differential_amount) || 0;
+      // For negative differentials we render the sign to make it read
+      // as "employee owes back" instead of "we owe less".
+      if (amount < 0) {
+        amountPrefix = '-INR ';
+      } else if (amount > 0) {
+        amountPrefix = '+INR ';
+      }
+    } else if (isSettled && s.actuals_json) {
+      try { amount = parseFloat(JSON.parse(s.actuals_json).actual_amount) || 0; }
+      catch (_) { amount = 0; }
+    } else {
+      amount = parseFloat(s.total_amount) || 0;
+    }
+
+    // Form label with a settled-advance tag appended so Arasu can see
+    // at a glance which rows are "already paid, differential only" vs
+    // "regular reimbursement".
+    const baseLabel = FORM_LABEL[s.form_type] || s.form_type;
+    const formLabel = isSettledAdvance
+      ? `${baseLabel}  [advance settled]`
+      : baseLabel;
 
     page.drawText(idx,               { x: MARGIN,       y: rowY, size: 9, font, color: MUTED });
     page.drawText(s.reference,       { x: MARGIN + 25,  y: rowY, size: 9, font: fontBold, color: INK });
-    page.drawText(FORM_LABEL[s.form_type] || s.form_type, {
-                                       x: MARGIN + 155, y: rowY, size: 9, font, color: INK });
+    page.drawText(formLabel,         { x: MARGIN + 155, y: rowY, size: 9, font,
+                                       color: isSettledAdvance ? MUTED : INK });
     page.drawText(fmtDate(s.submitted_at), {
                                        x: MARGIN + 260, y: rowY, size: 9, font, color: MUTED });
-    page.drawText(`INR ${fmtInr(amount)}`, {
-                                       x: width - MARGIN - 130, y: rowY, size: 9, font: fontBold, color: INK });
+
+    // Late-settlement badge on the row (small ⚠️ marker in front of the
+    // amount). Only shows on rows that were flagged late at file-time.
+    if (s.late_settlement) {
+      page.drawText('LATE', {
+        x: width - MARGIN - 190, y: rowY,
+        size: 7, font: fontBold, color: rgb(0.72, 0.16, 0.16),
+      });
+    }
+
+    const amountColor = amount < 0 ? rgb(0.72, 0.16, 0.16) : INK;
+    page.drawText(`${amountPrefix}${fmtInr(Math.abs(amount))}`, {
+                                       x: width - MARGIN - 130, y: rowY, size: 9,
+                                       font: fontBold, color: amountColor });
     // The "Open" affordance — styled like a link, real annotation added later
     page.drawText('>',                 { x: width - MARGIN - 26, y: rowY, size: 14, font: fontBold, color: BRAND });
 
@@ -367,7 +416,18 @@ async function buildConsolidatedReport({ employee, period, submissions, loadAtta
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
 
   const generatedAt = new Date().toISOString();
+  // Net payable to (or by) the employee for this month:
+  //   - regular approved      → +total_amount
+  //   - settled advance       → +differential_amount (signed, can be -ve)
+  //   - settled non-advance   → +actual_amount from actuals_json
+  // Kept in sync with the same computation in
+  // consolidate-scheduler.generateForEmployeePeriod and the DB rollup
+  // query, so all three views (PDF cover, DB row.total_amount, monthly-
+  // summary approved_total) show the same number.
   const totalAmount = submissions.reduce((acc, s) => {
+    if (s.status === 'settled' && s.form_type === 'met_advance') {
+      return acc + (parseFloat(s.differential_amount) || 0);
+    }
     if (s.status === 'settled' && s.actuals_json) {
       try { return acc + (parseFloat(JSON.parse(s.actuals_json).actual_amount) || 0); }
       catch (_) { return acc; }
@@ -415,8 +475,6 @@ async function buildConsolidatedReport({ employee, period, submissions, loadAtta
         }
       } catch (e) {
         console.error(`[consolidated] failed to embed ${s.reference} report:`, e.message);
-        // Fall through and add a placeholder page so the TOC link at
-        // least lands somewhere reasonable
         const pg = doc.addPage([A4.w, A4.h]);
         pg.drawText(`Could not embed report for ${s.reference}`, {
           x: MARGIN, y: A4.h - 100, size: 12, font: fontBold, color: rgb(0.7, 0.1, 0.1),
@@ -425,9 +483,6 @@ async function buildConsolidatedReport({ employee, period, submissions, loadAtta
         drawHomeLink(pg, tocPage, font);
       }
     } else {
-      // No individual report PDF on disk (shouldn't happen for approved
-      // submissions, but be defensive) — add a title page so the TOC
-      // link points somewhere.
       const pg = doc.addPage([A4.w, A4.h]);
       pg.drawText(s.reference, { x: MARGIN, y: A4.h - 100, size: 20, font: fontBold, color: INK });
       pg.drawText(FORM_LABEL[s.form_type] || s.form_type, {
@@ -436,6 +491,84 @@ async function buildConsolidatedReport({ employee, period, submissions, loadAtta
       if (!submissionFirstPage) submissionFirstPage = pg;
       drawHomeLink(pg, tocPage, font);
     }
+
+    // Turn 4 — Per-block banner for settled advances. A small colored
+    // strip overlaid at the top of the first embedded page, telling
+    // Arasu / Accounts that:
+    //   - The advance was already paid (do NOT pay again from this block)
+    //   - Only the differential is being reconciled this month
+    // Positioned below any brand-strip at the very top of the source PDF
+    // so it doesn't clobber the source's own header. Late-settlement rows
+    // also get a small ⚠️ marker on this strip.
+    if (submissionFirstPage && s.status === 'settled' && s.form_type === 'met_advance') {
+      const { width: pw, height: ph } = submissionFirstPage.getSize();
+      const bannerH = 42;
+      const bannerY = ph - 60 - bannerH;  // ~60pt down from top edge
+
+      const advanceAmt = parseFloat(s.total_amount) || 0;
+      let actualAmt = 0;
+      try { actualAmt = parseFloat(JSON.parse(s.actuals_json || '{}').actual_amount) || 0; }
+      catch (_) {}
+      const diff = parseFloat(s.differential_amount) || 0;
+
+      // Background strip — light amber so it's clearly overlaid but
+      // doesn't overpower the underlying content.
+      submissionFirstPage.drawRectangle({
+        x: 24, y: bannerY, width: pw - 48, height: bannerH,
+        color: rgb(1.0, 0.976, 0.918),   // #fff7ea
+        borderColor: rgb(0.85, 0.55, 0.05),
+        borderWidth: 0.8,
+        opacity: 0.94,
+      });
+
+      // Left side — the "already paid" callout
+      submissionFirstPage.drawText('ADVANCE ALREADY PAID', {
+        x: 34, y: bannerY + bannerH - 14, size: 8, font: fontBold, color: rgb(0.6, 0.35, 0.02),
+      });
+      submissionFirstPage.drawText(
+        `Payment released${s.advance_paid_at ? ' on ' + fmtDate(s.advance_paid_at) : ''}${s.advance_paid_by ? ' by ' + s.advance_paid_by.split('@')[0] : ''}. This block is FYI — do not pay again from here.`,
+        { x: 34, y: bannerY + 10, size: 8, font, color: rgb(0.4, 0.25, 0.02),
+          maxWidth: (pw - 48) * 0.62 },
+      );
+
+      // Right side — the differential summary
+      const rightX = 24 + (pw - 48) * 0.64;
+      submissionFirstPage.drawText('THIS MONTH:', {
+        x: rightX, y: bannerY + bannerH - 14, size: 7, font: fontBold, color: rgb(0.6, 0.35, 0.02),
+      });
+      const diffLabel = diff > 0 ? `Owe employee: +INR ${fmtInr(diff)}`
+                      : diff < 0 ? `Employee owes back: INR ${fmtInr(Math.abs(diff))}`
+                      : 'Balanced (advance = actual)';
+      const diffColor = diff < 0 ? rgb(0.72, 0.16, 0.16)
+                      : diff > 0 ? rgb(0.02, 0.5, 0.35)
+                      : rgb(0.35, 0.35, 0.35);
+      submissionFirstPage.drawText(diffLabel, {
+        x: rightX, y: bannerY + bannerH - 26, size: 9, font: fontBold, color: diffColor,
+      });
+      submissionFirstPage.drawText(
+        `advance INR ${fmtInr(advanceAmt)}  ·  actual INR ${fmtInr(actualAmt)}`,
+        { x: rightX, y: bannerY + 10, size: 7, font, color: rgb(0.4, 0.25, 0.02) },
+      );
+
+      // Late-settlement badge appended to the top-right corner of the strip
+      if (s.late_settlement) {
+        const badgeX = pw - 24 - 68;
+        const badgeY = bannerY + bannerH + 4;
+        submissionFirstPage.drawRectangle({
+          x: badgeX, y: badgeY, width: 68, height: 12,
+          color: rgb(0.98, 0.90, 0.90),
+          borderColor: rgb(0.72, 0.16, 0.16), borderWidth: 0.6,
+        });
+        const lateText = s.late_hours != null
+          ? `LATE +${Math.round(s.late_hours)}h`
+          : 'LATE SETTLEMENT';
+        submissionFirstPage.drawText(lateText, {
+          x: badgeX + 4, y: badgeY + 3, size: 7, font: fontBold,
+          color: rgb(0.60, 0.10, 0.10),
+        });
+      }
+    }
+
 
     // B. Attached bills for this submission
     let attachments = [];

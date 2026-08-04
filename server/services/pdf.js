@@ -313,22 +313,109 @@ function generatePdf({ submission, employee, payload, attachments = [], formMeta
       }
       // For 'pending' (and 'draft' in turn 2), both stay blank.
 
-      const cols = [
-        { x: 50,                       name: employee.name || '', label: 'EMPLOYEE · DATE' },
-        { x: 50 + sigColW + gap,       name: checkedBy,           label: 'CHECKED BY · DATE' },
-        { x: 50 + (sigColW + gap) * 2, name: approvedBy,          label: 'APPROVED BY · DATE' },
-      ];
-      cols.forEach(c => {
+      // Turn 4 — Travel Advance uses a three-stage approval chain
+      // (HR verify → Arasu approve → Accounts pay) before the trip.
+      // The signature row for advances shows all three stages stacked
+      // in a single block, replacing the traditional CHECKED / APPROVED
+      // slots. Employee sign-off stays on the left as usual.
+      const isAdvance = submission.form_type === 'met_advance';
+
+      if (isAdvance) {
+        // 2-col layout: Employee | Multi-stage approval block
+        const advBlockX = 50 + sigColW + gap;
+        const advBlockW = sigColW * 2 + gap;
+
+        // Employee column — same as regular
         doc.lineWidth(0.7).strokeColor(INK)
-           .moveTo(c.x, sigY).lineTo(c.x + sigColW, sigY).stroke();
-        if (c.name) {
+           .moveTo(50, sigY).lineTo(50 + sigColW, sigY).stroke();
+        if (employee.name) {
           doc.fontSize(9).fillColor(INK).font('Helvetica')
-             .text(c.name, c.x, sigY + 4, { width: sigColW, lineBreak: false, ellipsis: true });
+             .text(employee.name, 50, sigY + 4, { width: sigColW, lineBreak: false, ellipsis: true });
         }
         doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
-           .text(c.label, c.x, sigY + 20, { characterSpacing: 1.1, width: sigColW });
-      });
-      doc.y = sigY + 40;
+           .text('EMPLOYEE · DATE', 50, sigY + 20, { characterSpacing: 1.1, width: sigColW });
+
+        // Multi-stage block — three horizontal rows, each with a label
+        // on the left and the signer/timestamp on the right. Only rows
+        // that have been filled are shown filled; the rest are empty.
+        const rows = [
+          {
+            label: 'HR VERIFIED',
+            fill:  fmtSignoff(submission.advance_hr_verified_by,   submission.advance_hr_verified_at),
+          },
+          {
+            label: 'MGMT APPROVED',
+            fill:  fmtSignoff(submission.advance_mgmt_approved_by, submission.advance_mgmt_approved_at),
+          },
+          {
+            label: 'ACCOUNTS PAID',
+            fill:  fmtSignoff(submission.advance_paid_by,          submission.advance_paid_at),
+          },
+        ];
+        // If this is a settled row, tack on the settlement approver as a
+        // 4th line — the settlement review is the actual closing of the
+        // loop after the trip.
+        if (submission.status === 'settled') {
+          rows.push({
+            label: 'SETTLEMENT APPROVED',
+            fill:  fmtSignoff(submission.settlement_reviewed_by, submission.settlement_reviewed_at),
+          });
+        }
+
+        const rowH = 14;
+        for (let ri = 0; ri < rows.length; ri++) {
+          const r = rows[ri];
+          const y = sigY + 4 + ri * rowH;
+          // Label on the left (fixed width so signer text starts at same X)
+          doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
+             .text(r.label, advBlockX, y, { characterSpacing: 1.1, width: 110 });
+          // Signer text on the right — empty when the stage hasn't happened
+          if (r.fill) {
+            doc.fontSize(8).fillColor(INK).font('Helvetica')
+               .text(r.fill, advBlockX + 115, y, {
+                 width: advBlockW - 115, lineBreak: false, ellipsis: true,
+               });
+          } else {
+            // Draw an empty underline so the reader sees "yet to happen"
+            doc.lineWidth(0.4).strokeColor(MUTED)
+               .moveTo(advBlockX + 115, y + 9)
+               .lineTo(advBlockX + advBlockW - 5, y + 9)
+               .dash(2, { space: 2 })
+               .stroke()
+               .undash();
+          }
+        }
+        // Late-settlement badge (only when the row was flagged during
+        // settlement filing). Placed to the right of the block header.
+        if (submission.late_settlement) {
+          const badgeX = advBlockX + advBlockW - 90;
+          const badgeY = sigY - 10;
+          doc.roundedRect(badgeX, badgeY - 2, 84, 14, 2).fill('#fef2f2').stroke('#dc2626');
+          doc.fontSize(7).fillColor('#991b1b').font('Helvetica-Bold')
+             .text('LATE SETTLEMENT', badgeX + 4, badgeY + 1, { characterSpacing: 0.8, width: 76 });
+          doc.fillColor(INK).strokeColor(INK);
+        }
+        // Bump the y-cursor past the block for whatever comes next
+        doc.y = sigY + 4 + rows.length * rowH + 12;
+      } else {
+        // Regular 3-column layout (unchanged) for non-advance forms
+        const cols = [
+          { x: 50,                       name: employee.name || '', label: 'EMPLOYEE · DATE' },
+          { x: 50 + sigColW + gap,       name: checkedBy,           label: 'CHECKED BY · DATE' },
+          { x: 50 + (sigColW + gap) * 2, name: approvedBy,          label: 'APPROVED BY · DATE' },
+        ];
+        cols.forEach(c => {
+          doc.lineWidth(0.7).strokeColor(INK)
+             .moveTo(c.x, sigY).lineTo(c.x + sigColW, sigY).stroke();
+          if (c.name) {
+            doc.fontSize(9).fillColor(INK).font('Helvetica')
+               .text(c.name, c.x, sigY + 4, { width: sigColW, lineBreak: false, ellipsis: true });
+          }
+          doc.fontSize(7).fillColor(MUTED).font('Helvetica-Bold')
+             .text(c.label, c.x, sigY + 20, { characterSpacing: 1.1, width: sigColW });
+        });
+        doc.y = sigY + 40;
+      }
 
       // -- Attachments / bills --------------------------------------
       // When the bills will be MERGED into this PDF afterwards (the normal

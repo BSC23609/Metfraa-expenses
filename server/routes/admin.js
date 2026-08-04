@@ -30,11 +30,22 @@ router.get('/submissions', requireAdmin, (req, res) => {
 //   Travel Advances awaiting settlement approval. The frontend can
 //   distinguish using the 'status' field on each row.
 router.get('/pending', requireAdmin, (req, res) => {
-  const pending = stmts.listSubmissionsByStatus.all('pending');
-  const settlementPending = stmts.listSubmissionsByStatus.all('settlement_pending');
+  // Pending Approvals shows five in-flight review states:
+  //   pending                — regular claims OR Stage 1 advance (HR verify)
+  //   advance_hr_verified    — Stage 2 advance (awaiting Arasu)
+  //   advance_mgmt_approved  — Stage 3 advance (awaiting Accounts payment)
+  //   settlement_pending     — post-trip bills uploaded, awaiting HR settlement approval
+  // Each has different action buttons in the UI. The counts are broken
+  // out so the tab badge can show a total and per-stage numbers.
+  const pending             = stmts.listSubmissionsByStatus.all('pending');
+  const advanceHrVerified   = stmts.listSubmissionsByStatus.all('advance_hr_verified');
+  const advanceMgmtApproved = stmts.listSubmissionsByStatus.all('advance_mgmt_approved');
+  const settlementPending   = stmts.listSubmissionsByStatus.all('settlement_pending');
   res.json({
-    submissions: [...pending, ...settlementPending],
+    submissions: [...pending, ...advanceHrVerified, ...advanceMgmtApproved, ...settlementPending],
     pending_count: pending.length,
+    advance_hr_verified_count: advanceHrVerified.length,
+    advance_mgmt_approved_count: advanceMgmtApproved.length,
     settlement_pending_count: settlementPending.length,
   });
 });
@@ -59,10 +70,19 @@ router.post('/submissions/:id/approve', requireAdmin, async (req, res) => {
 
   try {
     if (isAdvance) {
-      // Advance: keep it open, awaiting employee settlement after the trip.
-      stmts.approveAdvanceRequest.run({ id, reviewed_by: req.user.email, review_note: (req.body && req.body.note) || '' });
-      // Regenerate the snapshot — its signature row now shows the advance
-      // approver in the CHECKED BY slot; APPROVED BY waits for settlement.
+      // TURN 4 CHANGE: HR "approve" on a Travel Advance is now
+      // "verify" — Stage 1 of a three-step chain. Status goes to
+      // advance_hr_verified (was: advance_approved). Then we email
+      // Arasu for Stage 2 approval; Arasu's approval flips it to
+      // advance_mgmt_approved and emails Accounts; Accounts records
+      // payment via a dedicated endpoint and only THEN does the
+      // status flip to advance_approved (unchanged from here).
+      stmts.advanceHrVerify.run({
+        id, reviewed_by: req.user.email,
+        review_note: (req.body && req.body.note) || null,
+      });
+      // Regenerate the snapshot — signature row now shows HR VERIFIED,
+      // MGMT APPROVED / ACCOUNTS PAID slots stay empty until later.
       try {
         const fresh = stmts.getSubmission.get(id);
         const reportPdfPath = await buildReportPdf(fresh, { draft: false });
@@ -73,14 +93,36 @@ router.post('/submissions/:id/approve', requireAdmin, async (req, res) => {
           designation: sub.designation, department: sub.department,
         }, attachments, reportPdfPath);
       } catch (e) {
-        console.error('[advance-approve snapshot]', e);
+        console.error('[advance-hr-verify snapshot]', e);
+      }
+      // Email Arasu with the individual advance PDF for Stage 2 approval.
+      let advanceEmailErr = null;
+      try {
+        const { sendAdvanceForMgmtApproval } = require('../services/email');
+        const fresh = stmts.getSubmission.get(id);
+        await sendAdvanceForMgmtApproval({
+          submission: fresh,
+          employee: {
+            name: sub.employee_name, email: sub.employee_email,
+            employee_code: sub.employee_code, level: sub.level,
+          },
+          pdfPath: fresh.pdf_path,
+        });
+      } catch (e) {
+        advanceEmailErr = e.message || String(e);
+        console.error('[advance-hr-verify email]', e);
       }
       stmts.insertAudit.run({
-        actor_email: req.user.email, action: 'APPROVE_ADVANCE', target_type: 'submission', target_id: id,
-        meta_json: JSON.stringify({ ref: sub.reference }),
+        actor_email: req.user.email, action: 'ADVANCE_HR_VERIFY',
+        target_type: 'submission', target_id: id,
+        meta_json: JSON.stringify({ ref: sub.reference, email_err: advanceEmailErr }),
         ip_address: req.ip,
       });
-      return res.json({ ok: true, advance_open: true, pdf_url: `/api/submissions/${id}/pdf` });
+      return res.json({
+        ok: true, advance_stage: 'mgmt_review',
+        email_ok: !advanceEmailErr, email_error: advanceEmailErr,
+        pdf_url: `/api/submissions/${id}/pdf`,
+      });
     }
 
     // Mark approved first (so the Excel row reflects it)
@@ -136,9 +178,21 @@ router.post('/submissions/:id/approve-settlement', requireAdmin, async (req, res
     return res.status(400).json({ error: `Cannot approve settlement from '${sub.status}' status.` });
   }
   try {
+    // TURN 4 CHANGE: compute differential = actual - advance and store it
+    // on the row. The consolidated report will pick up this signed number
+    // instead of the full actual, since the advance was already paid.
+    const advanceAmount = Number(sub.total_amount) || 0;
+    let actualAmount = 0;
+    try {
+      const actuals = JSON.parse(sub.actuals_json || '{}');
+      actualAmount = Number(actuals.actual_amount) || 0;
+    } catch (_) { actualAmount = 0; }
+    const differential = +(actualAmount - advanceAmount).toFixed(2);
+
     stmts.approveSettlement.run({
       id, reviewed_by: req.user.email,
       settlement_note: (req.body && req.body.note) || '',
+      differential_amount: differential,
     });
     const fresh = stmts.getSubmission.get(id);
     const reportPdfPath = await buildReportPdf(fresh, { draft: false });
@@ -254,6 +308,136 @@ router.post('/submissions/:id/reject', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('[reject]', err);
     res.status(500).json({ error: err.message || 'Rejection failed' });
+  }
+});
+
+// ---- Advance: Arasu approves (Stage 2 of the pre-trip chain) --------
+// Called from the row's "Approve advance" button that appears on
+// status='advance_hr_verified' rows. Flips to advance_mgmt_approved and
+// emails Accounts (accounts@metfraa.com, CC admin@metfraa.com) with the
+// signed advance PDF attached.
+router.post('/submissions/:id/advance-mgmt-approve', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.form_type !== 'met_advance') {
+    return res.status(400).json({ error: 'Only Travel Advance submissions have a management-approval step.' });
+  }
+  if (sub.status !== 'advance_hr_verified') {
+    return res.status(400).json({ error: `Cannot mgmt-approve advance from '${sub.status}' status.` });
+  }
+  try {
+    stmts.advanceMgmtApprove.run({ id, reviewed_by: req.user.email });
+    // Regenerate the snapshot with the new signoff on it
+    try {
+      const fresh = stmts.getSubmission.get(id);
+      const reportPdfPath = await buildReportPdf(fresh, { draft: false });
+      const attachments = stmts.listAttachments.all(id);
+      await syncSvc.buildAndArchiveSnapshot(fresh, {
+        name: sub.employee_name, email: sub.employee_email,
+        employee_code: sub.employee_code, level: sub.level,
+        designation: sub.designation, department: sub.department,
+      }, attachments, reportPdfPath);
+    } catch (e) {
+      console.error('[advance-mgmt-approve snapshot]', e);
+    }
+    // Email Accounts@ for payment
+    let emailErr = null;
+    try {
+      const { sendAdvanceToAccounts } = require('../services/email');
+      const fresh = stmts.getSubmission.get(id);
+      await sendAdvanceToAccounts({
+        submission: fresh,
+        employee: {
+          name: sub.employee_name, email: sub.employee_email,
+          employee_code: sub.employee_code, level: sub.level,
+        },
+        pdfPath: fresh.pdf_path,
+      });
+    } catch (e) {
+      emailErr = e.message || String(e);
+      console.error('[advance-mgmt-approve email]', e);
+    }
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'ADVANCE_MGMT_APPROVE',
+      target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, email_err: emailErr }),
+      ip_address: req.ip,
+    });
+    res.json({
+      ok: true, advance_stage: 'accounts_pay',
+      email_ok: !emailErr, email_error: emailErr,
+    });
+  } catch (err) {
+    console.error('[advance-mgmt-approve]', err);
+    res.status(500).json({ error: err.message || 'Approval failed' });
+  }
+});
+
+// ---- Advance: Record payment (Stage 3 of the pre-trip chain) --------
+// Called from the row's "Record payment" button on rows in
+// status='advance_mgmt_approved'. Accountant confirms the money has left,
+// portal flips to advance_approved and the employee gets an email saying
+// "advance is disbursed, upload bills within 72h of trip completion".
+//
+// HR clicks this on behalf of Accounts (there's no separate Accounts
+// login yet — if that changes later, this endpoint's requireAdmin can be
+// swapped for a role check).
+router.post('/submissions/:id/advance-mark-paid', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.form_type !== 'met_advance') {
+    return res.status(400).json({ error: 'Only Travel Advance submissions can be marked paid this way.' });
+  }
+  if (sub.status !== 'advance_mgmt_approved') {
+    return res.status(400).json({ error: `Cannot mark paid from '${sub.status}' status.` });
+  }
+  try {
+    stmts.advanceMarkPaid.run({ id, paid_by: req.user.email });
+    // Regenerate snapshot with the Accounts signoff
+    try {
+      const fresh = stmts.getSubmission.get(id);
+      const reportPdfPath = await buildReportPdf(fresh, { draft: false });
+      const attachments = stmts.listAttachments.all(id);
+      await syncSvc.buildAndArchiveSnapshot(fresh, {
+        name: sub.employee_name, email: sub.employee_email,
+        employee_code: sub.employee_code, level: sub.level,
+        designation: sub.designation, department: sub.department,
+      }, attachments, reportPdfPath);
+    } catch (e) {
+      console.error('[advance-mark-paid snapshot]', e);
+    }
+    // Email the employee: advance disbursed, 72h settlement window starts
+    // after trip completion
+    let emailErr = null;
+    try {
+      const { sendAdvancePaidToEmployee } = require('../services/email');
+      const fresh = stmts.getSubmission.get(id);
+      await sendAdvancePaidToEmployee({
+        submission: fresh,
+        employee: {
+          name: sub.employee_name, email: sub.employee_email,
+          employee_code: sub.employee_code, level: sub.level,
+        },
+      });
+    } catch (e) {
+      emailErr = e.message || String(e);
+      console.error('[advance-mark-paid email]', e);
+    }
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'ADVANCE_MARK_PAID',
+      target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, email_err: emailErr }),
+      ip_address: req.ip,
+    });
+    res.json({
+      ok: true, advance_stage: 'paid',
+      email_ok: !emailErr, email_error: emailErr,
+    });
+  } catch (err) {
+    console.error('[advance-mark-paid]', err);
+    res.status(500).json({ error: err.message || 'Mark-paid failed' });
   }
 });
 

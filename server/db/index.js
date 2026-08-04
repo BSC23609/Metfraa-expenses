@@ -179,6 +179,37 @@ db.exec(`
   add('deadline_bypass',         `deadline_bypass INTEGER DEFAULT 0`); // 1 = period lock waived for this row (set by consolidated-report rejection, Turn 2)
   add('project_id',              `project_id INTEGER`);      // FK to projects.id, nullable for Sales Visits with no project
   add('client_name',             `client_name TEXT`);        // free-text alternative when no project (sales prospect)
+
+  // Travel Advance workflow columns (Turn 4). The advance now goes through
+  // a three-step chain BEFORE the trip: HR verifies → Arasu approves →
+  // Accounts records payment. Only after Accounts marks paid does the
+  // status flip to advance_approved and the employee travels.
+  //
+  //   Advance stages, tracked by advance_stage on rows where form_type='met_advance':
+  //     'hr_review'    — awaiting HR verification (status=pending)
+  //     'mgmt_review'  — HR verified, awaiting Arasu (status=advance_hr_verified)
+  //     'accounts_pay' — Arasu approved, awaiting Accounts payment (status=advance_mgmt_approved)
+  //     'paid'         — Accounts recorded payment (status=advance_approved, existing state)
+  //
+  //   trip_end_date + late_settlement flag: employee provides trip end
+  //   date when filing settlement. Deadline = trip_end_date + 72 hours
+  //   (IST). Past deadline is a soft warning — the settlement still goes
+  //   through, but late_settlement=1 and late_hours records the delta.
+  //
+  //   differential_amount: computed when HR approves the settlement.
+  //   = actual_amount - advance_amount. Signed: positive means employee
+  //   is owed more, negative means employee owes the company back.
+  add('advance_stage',              `advance_stage TEXT`);
+  add('advance_hr_verified_by',     `advance_hr_verified_by TEXT`);
+  add('advance_hr_verified_at',     `advance_hr_verified_at TEXT`);
+  add('advance_mgmt_approved_by',   `advance_mgmt_approved_by TEXT`);
+  add('advance_mgmt_approved_at',   `advance_mgmt_approved_at TEXT`);
+  add('advance_paid_by',            `advance_paid_by TEXT`);
+  add('advance_paid_at',            `advance_paid_at TEXT`);
+  add('trip_end_date',              `trip_end_date TEXT`);
+  add('late_settlement',            `late_settlement INTEGER DEFAULT 0`);
+  add('late_hours',                 `late_hours REAL`);
+  add('differential_amount',        `differential_amount REAL`);
   // Normalise any legacy 'submitted' status to 'pending'
   db.exec(`UPDATE submissions SET status='pending' WHERE status='submitted'`);
 
@@ -490,22 +521,82 @@ const stmts = {
   // re-linked via the normal attachment-insertion path.
   deleteAttachmentsForSubmission: db.prepare(`DELETE FROM attachments WHERE submission_id = ?`),
   // -- Travel Advance settlement lifecycle ---------------------------
-  // Used by admin approve when the form is met_advance — keeps the advance
-  // OPEN (status='advance_approved') instead of closing it as 'approved'.
+  //
+  // TURN 4 CHANGE: what used to be a single-click HR approve is now a
+  // three-step chain before the trip.
+  //
+  //   Old:  pending → HR Approve → advance_approved (open)
+  //   New:  pending → HR Verify → advance_hr_verified
+  //                → Arasu Approves → advance_mgmt_approved
+  //                → Accounts Records Payment → advance_approved (open, unchanged from here)
+  //
+  // The advance_approved / settlement_pending / settled tail is preserved
+  // exactly. Only the pre-trip approval chain expanded.
+
+  // Step 1: HR verifies the advance request. Status flips out of 'pending'
+  // so it stops showing in the Pending Approvals tab under the HR-verify
+  // list — it now shows up in the Awaiting-Arasu list instead.
+  advanceHrVerify: db.prepare(`
+    UPDATE submissions SET status='advance_hr_verified',
+      advance_stage='mgmt_review',
+      advance_hr_verified_by=@reviewed_by,
+      advance_hr_verified_at=datetime('now'),
+      reviewed_by=@reviewed_by, reviewed_at=datetime('now'),
+      review_note=COALESCE(@review_note, review_note)
+    WHERE id=@id AND status='pending' AND form_type='met_advance'
+  `),
+  // Step 2: Arasu approves the advance.
+  advanceMgmtApprove: db.prepare(`
+    UPDATE submissions SET status='advance_mgmt_approved',
+      advance_stage='accounts_pay',
+      advance_mgmt_approved_by=@reviewed_by,
+      advance_mgmt_approved_at=datetime('now')
+    WHERE id=@id AND status='advance_hr_verified'
+  `),
+  // Step 3: Accounts records payment. THIS is the point where the
+  // advance officially becomes "open" (trip can happen). Preserves the
+  // existing advance_approved status so the settlement flow downstream
+  // works unchanged.
+  advanceMarkPaid: db.prepare(`
+    UPDATE submissions SET status='advance_approved',
+      advance_stage='paid',
+      advance_paid_by=@paid_by,
+      advance_paid_at=datetime('now')
+    WHERE id=@id AND status='advance_mgmt_approved'
+  `),
+
+  // Legacy statement kept for backward compat with any callers that used
+  // it directly. New code paths go through the chain above. This is now
+  // a "skip straight to paid" path — should be avoided but not removed.
   approveAdvanceRequest: db.prepare(`
-    UPDATE submissions SET status='advance_approved', reviewed_by=@reviewed_by,
+    UPDATE submissions SET status='advance_approved',
+      advance_stage='paid',
+      reviewed_by=@reviewed_by,
       reviewed_at=datetime('now'), review_note=@review_note WHERE id=@id
   `),
   // Employee files the settlement: attaches actuals + bills, status flips to
   // 'settlement_pending' (awaiting second admin approval).
+  //
+  // TURN 4 CHANGE: also captures trip_end_date so we can compute whether
+  // this is a late settlement (>72h after trip end). late_settlement is
+  // computed here at file-time — it's a snapshot, not re-computed later.
   fileSettlement: db.prepare(`
     UPDATE submissions SET status='settlement_pending', actuals_json=@actuals_json,
-      settled_at=datetime('now') WHERE id=@id
+      settled_at=datetime('now'),
+      trip_end_date=@trip_end_date,
+      late_settlement=@late_settlement,
+      late_hours=@late_hours
+    WHERE id=@id
   `),
   // Admin approves the settlement: status -> 'settled' (closed).
+  //
+  // TURN 4 CHANGE: differential_amount is stored on the row here. The
+  // consolidated report then picks it up instead of the full actual.
   approveSettlement: db.prepare(`
     UPDATE submissions SET status='settled', settlement_reviewed_by=@reviewed_by,
-      settlement_reviewed_at=datetime('now'), settlement_note=@settlement_note WHERE id=@id
+      settlement_reviewed_at=datetime('now'), settlement_note=@settlement_note,
+      differential_amount=@differential_amount
+    WHERE id=@id
   `),
   // Admin rejects the settlement: status -> 'settlement_rejected'. Employee
   // may re-file (which will flip back to 'settlement_pending').
@@ -514,14 +605,19 @@ const stmts = {
       settlement_reviewed_at=datetime('now'), settlement_note=@settlement_note WHERE id=@id
   `),
   // Employees see all their in-flight advances:
-  //   pending             — awaiting first approval (no Settle button shown)
-  //   advance_approved    — disbursed, ready to be settled
-  //   settlement_rejected — settlement was rejected, employee can re-file
+  //   pending                — awaiting HR verification (Stage 1)
+  //   advance_hr_verified    — awaiting Arasu (Stage 2)
+  //   advance_mgmt_approved  — awaiting Accounts payment (Stage 3)
+  //   advance_approved       — disbursed, ready to be settled
+  //   settlement_rejected    — settlement was rejected, employee can re-file
   listOpenAdvancesForEmployee: db.prepare(`
-    SELECT id, reference, period, total_amount, status, submitted_at, reviewed_at, payload_json
+    SELECT id, reference, period, total_amount, status, advance_stage,
+           submitted_at, reviewed_at, payload_json,
+           advance_hr_verified_at, advance_mgmt_approved_at, advance_paid_at
     FROM submissions
     WHERE employee_id = ? AND form_type = 'met_advance'
-      AND status IN ('pending', 'advance_approved', 'settlement_rejected')
+      AND status IN ('pending', 'advance_hr_verified', 'advance_mgmt_approved',
+                     'advance_approved', 'settlement_rejected')
     ORDER BY submitted_at DESC
   `),
   // OneDrive sync flags
@@ -709,7 +805,9 @@ Object.assign(stmts, {
     SELECT s.id, s.reference, s.form_type, s.period, s.total_amount, s.status,
            s.actuals_json, s.submitted_at, s.reviewed_by, s.reviewed_at,
            s.pdf_path, s.purpose_category, s.purpose_other_reason,
-           s.project_id, s.client_name
+           s.project_id, s.client_name,
+           s.differential_amount, s.advance_paid_at, s.advance_paid_by,
+           s.trip_end_date, s.late_settlement, s.late_hours, s.settled_at
     FROM submissions s
     WHERE s.employee_id = ?
       AND s.period = ?
@@ -849,17 +947,28 @@ Object.assign(stmts, {
       SUM(CASE WHEN s.status = 'pending'          THEN 1 ELSE 0 END)    AS pending_count,
       SUM(CASE WHEN s.status = 'approved'         THEN 1 ELSE 0 END)    AS approved_count,
       SUM(CASE WHEN s.status = 'settled'          THEN 1 ELSE 0 END)    AS settled_count,
+      SUM(CASE WHEN s.status = 'settled' AND s.form_type = 'met_advance' THEN 1 ELSE 0 END) AS settled_advance_count,
       SUM(CASE WHEN s.status = 'settled_offline'  THEN 1 ELSE 0 END)    AS settled_offline_count,
       SUM(CASE WHEN s.status = 'draft'            THEN 1 ELSE 0 END)    AS draft_count,
       SUM(CASE WHEN s.status = 'rejected'         THEN 1 ELSE 0 END)    AS rejected_count,
+      SUM(CASE WHEN s.status = 'advance_hr_verified'   THEN 1 ELSE 0 END) AS advance_hr_verified_count,
+      SUM(CASE WHEN s.status = 'advance_mgmt_approved' THEN 1 ELSE 0 END) AS advance_mgmt_approved_count,
       SUM(CASE WHEN s.status = 'advance_approved' THEN 1 ELSE 0 END)    AS advance_approved_count,
-      SUM(CASE WHEN s.status IN ('approved','settled')
-             THEN COALESCE(
-                   CASE WHEN s.status = 'settled'
-                        THEN json_extract(s.actuals_json, '$.actual_amount')
-                        ELSE NULL END,
-                   s.total_amount, 0)
-             ELSE 0 END)                                                AS approved_total
+      -- Payable total: what's owed to (or by) this employee at month-end.
+      --   regular approved     → +total_amount (full reimbursement)
+      --   settled advance      → +differential_amount only (signed)
+      --   settled non-advance  → +actual_amount from actuals_json
+      -- Total can go negative when settlement shortfalls exceed regular
+      -- reimbursements — employee owes company for this month.
+      SUM(CASE
+            WHEN s.status = 'approved'
+              THEN COALESCE(s.total_amount, 0)
+            WHEN s.status = 'settled' AND s.form_type = 'met_advance'
+              THEN COALESCE(s.differential_amount, 0)
+            WHEN s.status = 'settled'
+              THEN COALESCE(json_extract(s.actuals_json, '$.actual_amount'), s.total_amount, 0)
+            ELSE 0
+          END)                                                          AS approved_total
     FROM submissions s
     JOIN employees e ON e.id = s.employee_id
     WHERE s.period = ?

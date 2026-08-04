@@ -71,10 +71,12 @@ async function sendForApproval(employeeId, period, actorEmail) {
   const rollup = stmts.listMonthlySummaryForPeriod.all(period).find(r => r.employee_id === employeeId);
   if (!rollup) throw new Error('No submissions found for that employee in that month.');
   const blockers = [];
-  if (rollup.pending_count > 0)          blockers.push(`${rollup.pending_count} pending`);
-  if (rollup.draft_count > 0)            blockers.push(`${rollup.draft_count} draft`);
-  if (rollup.advance_approved_count > 0) blockers.push(`${rollup.advance_approved_count} awaiting settlement`);
-  if (rollup.rejected_count > 0)         blockers.push(`${rollup.rejected_count} rejected (must be re-submitted & approved, or excluded)`);
+  if (rollup.pending_count > 0)                blockers.push(`${rollup.pending_count} pending`);
+  if (rollup.draft_count > 0)                  blockers.push(`${rollup.draft_count} draft`);
+  if (rollup.advance_hr_verified_count > 0)    blockers.push(`${rollup.advance_hr_verified_count} advance awaiting Arasu`);
+  if (rollup.advance_mgmt_approved_count > 0)  blockers.push(`${rollup.advance_mgmt_approved_count} advance awaiting Accounts payment`);
+  if (rollup.advance_approved_count > 0)       blockers.push(`${rollup.advance_approved_count} advance awaiting settlement`);
+  if (rollup.rejected_count > 0)               blockers.push(`${rollup.rejected_count} rejected (must be re-submitted & approved, or excluded)`);
   if (blockers.length) {
     throw new Error(`Cannot send yet — ${blockers.join(', ')}. All submissions must be approved/settled first.`);
   }
@@ -232,12 +234,34 @@ function rejectReport(reportId, note, actorEmail) {
     let ids = [];
     try { ids = JSON.parse(report.submission_ids || '[]'); } catch (_) {}
     const noteWithAttribution = '[Management rejection] ' + trimmed;
+    // TURN 4 CHANGE: settled advances are NOT returned to draft on
+    // rejection — the advance money has already left Accounts, so
+    // reverting the row would create an accounting mess. Only the
+    // regular reimbursement claims are returned. The rejection note
+    // is still stamped onto the advance's settlement_note field for
+    // audit trail, but the row stays as 'settled'.
+    let returnedRegular = 0;
+    let touchedAdvances = 0;
     for (const sid of ids) {
-      stmts.bypassSubmissionForResubmit.run(noteWithAttribution, sid);
+      const sub = stmts.getSubmissionById.get(sid);
+      if (!sub) continue;
+      if (sub.status === 'settled' && sub.form_type === 'met_advance') {
+        // Stamp a note but leave status='settled'. HR follows up in the
+        // next cycle if there's a real issue.
+        db.prepare(`
+          UPDATE submissions
+             SET settlement_note = COALESCE(settlement_note, '') || ?
+           WHERE id = ?
+        `).run(`\n[Consolidated rejected on ${new Date().toISOString().slice(0,10)}: ${trimmed.slice(0,200)}]`, sid);
+        touchedAdvances++;
+      } else {
+        stmts.bypassSubmissionForResubmit.run(noteWithAttribution, sid);
+        returnedRegular++;
+      }
     }
-    return ids.length;
+    return { returnedRegular, touchedAdvances };
   });
-  const returnedCount = tx();
+  const { returnedRegular, touchedAdvances } = tx();
 
   stmts.insertAudit.run({
     actor_email: actorEmail,
@@ -247,13 +271,14 @@ function rejectReport(reportId, note, actorEmail) {
     meta_json: JSON.stringify({
       period: report.period,
       employee_id: report.employee_id,
-      returned_submissions: returnedCount,
+      returned_regular: returnedRegular,
+      touched_advances: touchedAdvances,
       note: trimmed.slice(0, 500),
     }),
     ip_address: null,
   });
 
-  return { ok: true, returned_submissions: returnedCount };
+  return { ok: true, returned_submissions: returnedRegular, advances_flagged: touchedAdvances };
 }
 
 module.exports = {

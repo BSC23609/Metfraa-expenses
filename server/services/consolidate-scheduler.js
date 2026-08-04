@@ -68,7 +68,29 @@ async function generateForEmployeePeriod(employeeId, period, { generatedBy = 'sy
     signoffs,
   });
 
+  // Compute the payable total for this month's consolidated report.
+  //
+  // For each submission:
+  //   - approved regular claim → add total_amount (full reimbursement)
+  //   - settled advance         → add ONLY the differential
+  //                               (actual − advance, signed). The advance
+  //                               itself was already paid by Accounts;
+  //                               only the excess/shortfall goes into
+  //                               this month's total.
+  //   - settled non-advance     → add actual_amount from actuals_json
+  //                               (legacy path for anything that used
+  //                               actuals without being an advance)
+  //
+  // The total CAN go negative — if the sum of shortfalls (employee spent
+  // less than advance) exceeds regular approved claims, the employee
+  // owes the company back for this month. The PDF cover shows this as
+  // "PAYABLE TO COMPANY" instead of "PAYABLE TO EMPLOYEE".
   const totalAmount = submissions.reduce((acc, s) => {
+    if (s.status === 'settled' && s.form_type === 'met_advance') {
+      // Settled advance — differential is signed, defaults to 0 if
+      // the row predates Turn 4 (before differential_amount was recorded).
+      return acc + (parseFloat(s.differential_amount) || 0);
+    }
     if (s.status === 'settled' && s.actuals_json) {
       try { return acc + (parseFloat(JSON.parse(s.actuals_json).actual_amount) || 0); }
       catch (_) { return acc; }
