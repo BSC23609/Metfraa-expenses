@@ -489,6 +489,28 @@ const stmts = {
       changes_required=NULL, returned_at=NULL
     WHERE id=@id
   `),
+  // Archive an abandoned draft — HR marks it as "no longer relevant"
+  // because the employee filed a replacement submission instead of
+  // fixing this one. The row stays in the DB for audit but is invisible
+  // to consolidation queries and to the row-lock guard in Monthly
+  // Wrap-up.
+  //
+  // Only draft rows can be archived directly. If HR needs to archive
+  // something in another state, they use Recall/Reopen/Send back first
+  // to move it to draft, then archive.
+  archiveDraftSubmission: db.prepare(`
+    UPDATE submissions SET status='archived', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note,
+      changes_required=NULL, returned_at=NULL
+    WHERE id=@id AND status='draft'
+  `),
+  // Undo an archive — send the row back to draft so HR can re-decide.
+  unarchiveSubmission: db.prepare(`
+    UPDATE submissions SET status='draft', reviewed_by=@reviewed_by,
+      reviewed_at=datetime('now'), review_note=@review_note,
+      returned_at=datetime('now')
+    WHERE id=@id AND status='archived'
+  `),
   // Check if a submission is currently locked by a non-rejected
   // consolidated report — if so, un-approval must be blocked (the money
   // has either already moved to accounts, or Arasu's mid-review).
@@ -949,6 +971,7 @@ Object.assign(stmts, {
       SUM(CASE WHEN s.status = 'settled'          THEN 1 ELSE 0 END)    AS settled_count,
       SUM(CASE WHEN s.status = 'settled' AND s.form_type = 'met_advance' THEN 1 ELSE 0 END) AS settled_advance_count,
       SUM(CASE WHEN s.status = 'settled_offline'  THEN 1 ELSE 0 END)    AS settled_offline_count,
+      SUM(CASE WHEN s.status = 'archived'         THEN 1 ELSE 0 END)    AS archived_count,
       SUM(CASE WHEN s.status = 'draft'            THEN 1 ELSE 0 END)    AS draft_count,
       SUM(CASE WHEN s.status = 'rejected'         THEN 1 ELSE 0 END)    AS rejected_count,
       SUM(CASE WHEN s.status = 'advance_hr_verified'   THEN 1 ELSE 0 END) AS advance_hr_verified_count,

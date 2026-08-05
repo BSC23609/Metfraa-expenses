@@ -1714,6 +1714,7 @@ body::after {
 .status-pill.settlement_pending  { background: rgba(180,83,9,0.16);   color: var(--bsg-warning); }
 .status-pill.settled             { background: rgba(5,150,105,0.16);  color: var(--bsg-success); }
 .status-pill.settled_offline     { background: rgba(75,85,99,0.12);   color: #4b5563; }
+.status-pill.archived            { background: rgba(107,114,128,0.14); color: #4b5563; text-decoration: line-through; }
 .status-pill.settlement_rejected { background: rgba(220,38,38,0.16);  color: var(--bsg-danger); }
 
 /* ---- Open Advances list / cards -------------------------------- */

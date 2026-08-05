@@ -564,6 +564,83 @@ router.post('/submissions/:id/recall', requireAdmin, (req, res) => {
   }
 });
 
+// ---- Archive a draft (abandoned) submission ------------------------
+// When an employee files a fresh submission instead of correcting a
+// sent-back draft, the old draft sits around blocking the Monthly
+// Wrap-up row-lock (which requires draft_count == 0). HR archives it —
+// status flips to 'archived', which:
+//   - is invisible to listApprovedForConsolidation
+//   - is invisible to the pending-approvals list
+//   - does NOT count as a blocker in the Monthly Wrap-up rollup
+//   - is still preserved in the DB for the audit trail
+//
+// The row is not deleted. HR can Unarchive later to bring it back to
+// draft if they realize it was archived by mistake.
+router.post('/submissions/:id/archive', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.status !== 'draft') {
+    return res.status(400).json({
+      error: `Only sent-back (draft) submissions can be archived. This one is '${sub.status}'. Send it back to draft first (or use Reopen/Recall) if you want to archive it.`,
+    });
+  }
+  const reason = ((req.body && req.body.reason) || '').trim();
+  if (reason.length < 3) return res.status(400).json({ error: 'Please give a reason (3+ chars).' });
+  if (reason.length > 1000) return res.status(400).json({ error: 'Reason too long (max 1000 chars).' });
+
+  try {
+    // Preserve any previous review note so the trail stays complete,
+    // then append the archive reason with a clear marker.
+    const combinedNote = (sub.review_note ? `${sub.review_note}\n---\n[Archived] ` : '[Archived] ') + reason;
+    stmts.archiveDraftSubmission.run({
+      id, reviewed_by: req.user.email,
+      review_note: combinedNote.slice(0, 2000),
+    });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'ARCHIVE_SUBMISSION',
+      target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, reason: reason.slice(0, 500) }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[archive]', err);
+    res.status(500).json({ error: err.message || 'Archive failed' });
+  }
+});
+
+// ---- Unarchive: bring an archived submission back to draft ---------
+router.post('/submissions/:id/unarchive', requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const sub = stmts.getSubmission.get(id);
+  if (!sub) return res.status(404).json({ error: 'Submission not found.' });
+  if (sub.status !== 'archived') {
+    return res.status(400).json({ error: `Only archived submissions can be unarchived. This one is '${sub.status}'.` });
+  }
+  const reason = ((req.body && req.body.reason) || '').trim();
+  if (reason.length < 3) return res.status(400).json({ error: 'Please give a reason (3+ chars).' });
+  if (reason.length > 1000) return res.status(400).json({ error: 'Reason too long (max 1000 chars).' });
+
+  try {
+    const combinedNote = (sub.review_note ? `${sub.review_note}\n---\n[Unarchived] ` : '[Unarchived] ') + reason;
+    stmts.unarchiveSubmission.run({
+      id, reviewed_by: req.user.email,
+      review_note: combinedNote.slice(0, 2000),
+    });
+    stmts.insertAudit.run({
+      actor_email: req.user.email, action: 'UNARCHIVE_SUBMISSION',
+      target_type: 'submission', target_id: id,
+      meta_json: JSON.stringify({ ref: sub.reference, reason: reason.slice(0, 500) }),
+      ip_address: req.ip,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[unarchive]', err);
+    res.status(500).json({ error: err.message || 'Unarchive failed' });
+  }
+});
+
 // ---- Employees: list ----------------------------------------------
 router.get('/employees', requireAdmin, (req, res) => {
   const includeInactive = req.query.all === '1';

@@ -3190,6 +3190,7 @@
     const isPending = s.status === 'pending' || s.status === 'settlement_pending';
     const isApproved = s.status === 'approved';
     const isDraft = s.status === 'draft';
+    const isArchived = s.status === 'archived';
     const isAdvanceHrVerified   = s.status === 'advance_hr_verified';
     const isAdvanceMgmtApproved = s.status === 'advance_mgmt_approved';
     return el('div', { class: 'admin-actions' },
@@ -3231,6 +3232,25 @@
         title: 'Pull this back into Pending Approvals to re-decide',
         onclick: () => recallDraftSubmission(s),
       }, 'Recall') : null,
+      // "Archive" — for abandoned drafts where the employee filed a new
+      // submission instead of correcting this one. Muted grey styling to
+      // signal "remove from consideration" (different from the amber
+      // "undo my decision" family). Archived rows drop out of the
+      // Monthly Wrap-up blockers so the row can unlock.
+      isDraft ? el('button', {
+        class: 'view',
+        style: 'background:transparent;color:#6b7280;border-color:#d1d5db;',
+        title: 'Employee filed a new submission instead of fixing this one — archive to unblock the month',
+        onclick: () => archiveSubmission(s),
+      }, 'Archive') : null,
+      // "Unarchive" — bring an archived row back to draft (if archived
+      // by mistake or if HR wants to look at it again)
+      isArchived ? el('button', {
+        class: 'view',
+        style: 'background:transparent;color:#b45309;border-color:#fcd34d;',
+        title: 'Bring this archived submission back to draft',
+        onclick: () => unarchiveSubmission(s),
+      }, 'Unarchive') : null,
     );
   }
 
@@ -3672,6 +3692,73 @@
       drawPendingTable(); drawSubmissionsTable();
     } catch (err) {
       toast(err.message || 'Recall failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // Archive an abandoned draft — HR marks it as "no longer relevant"
+  // because the employee filed a fresh submission instead of correcting
+  // this one. Removes it from the Monthly Wrap-up blockers so the row
+  // can unlock.
+  async function archiveSubmission(s) {
+    if (s.status !== 'draft') {
+      toast(`Only sent-back submissions can be archived (this one is '${s.status}').`, 'error');
+      return;
+    }
+    const reason = await promptModal({
+      title: 'Archive this submission?',
+      body: `${s.employee_name} · ${s.reference} · ₹${fmt(s.total_amount)}. Use this when the employee filed a new submission instead of correcting this one. The row stays in the DB for audit but drops out of the Monthly Wrap-up blockers.\n\nWhy are you archiving?`,
+      placeholder: 'e.g. Employee filed MET-LT-2608-042 as replacement',
+      confirmText: 'Archive',
+      required: true,
+    });
+    if (reason === null) return;
+    if (!reason || !reason.trim()) {
+      toast('Please give a reason.', 'error');
+      return;
+    }
+    showLoading('Archiving…');
+    try {
+      await api(`/api/admin/submissions/${s.id}/archive`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      toast('Archived · no longer blocks the month', 'success');
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Archive failed', 'error');
+    } finally { hideLoading(); }
+  }
+
+  // Undo an archive — bring the row back to draft.
+  async function unarchiveSubmission(s) {
+    if (s.status !== 'archived') {
+      toast(`Only archived submissions can be unarchived (this one is '${s.status}').`, 'error');
+      return;
+    }
+    const reason = await promptModal({
+      title: 'Unarchive this submission?',
+      body: `${s.employee_name} · ${s.reference}. This will bring it back to draft so you can Recall it (to re-review) or leave it for the employee to fix.\n\nWhy are you unarchiving?`,
+      placeholder: 'e.g. Realized this is actually the correct submission, not the new one',
+      confirmText: 'Unarchive',
+      required: true,
+    });
+    if (reason === null) return;
+    if (!reason || !reason.trim()) {
+      toast('Please give a reason.', 'error');
+      return;
+    }
+    showLoading('Unarchiving…');
+    try {
+      await api(`/api/admin/submissions/${s.id}/unarchive`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      toast('Unarchived · back in draft', 'success');
+      await Promise.all([loadPending(), loadSubmissions()]);
+      drawPendingTable(); drawSubmissionsTable();
+    } catch (err) {
+      toast(err.message || 'Unarchive failed', 'error');
     } finally { hideLoading(); }
   }
 
@@ -4445,6 +4532,7 @@
       addIf(chip(r.approved_count,                   'approved',       'approved'));
       addIf(chip(r.settled_count,                    'settled',        'approved'));
       addIf(chip(r.settled_offline_count,            'offline',        'settled_offline'));
+      addIf(chip(r.archived_count,                   'archived',       'draft'));
       addIf(chip(r.advance_hr_verified_count,        'adv awaiting Arasu',    'advance_hr_verified'));
       addIf(chip(r.advance_mgmt_approved_count,      'adv awaiting Accounts', 'advance_mgmt_approved'));
       addIf(chip(r.advance_approved_count,           'adv paid · awaiting settlement', 'advance_approved'));
